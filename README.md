@@ -62,31 +62,53 @@ Built for **Arch Linux + Hyprland** on an 8 GB machine that already uses
 
 ### First time only — full setup
 
+The model download is a **separate step** so a slow-internet user is never
+blocked by a ~500 MB download during initial setup:
+
 ```bash
-cd languageshadow
-./setup.sh              # creates .venv, installs deps, pre-downloads model,
-                        # builds the Svelte UI (npm install + npm run build)
+cd ScaleUpSpeech
+./setup.sh                       # 1. venv + Python deps + Svelte UI build (no model)
+python3 download_model.py       # 2. ONE-TIME Whisper model download (visible progress bars)
+./start_manager.sh              # 3. launch the manager
+# open http://127.0.0.1:8765/ in your browser
 ```
+
+`./setup.sh --with-model` also works if you want the model download bundled
+into setup (the old behaviour — useful for headless / CI installs).
 
 ### Every other time — just start it
 
 ```bash
-./start_manager.sh      # instant: reuses the existing .venv, no downloads
+./start_manager.sh      # instant: reuses the existing .venv + cached model
 # open http://127.0.0.1:8765/ in your browser
 ```
 
 `start_manager.sh` is self-healing: if (and only if) the venv or some
 dependency is missing, it calls `./setup.sh` for you — otherwise it starts
-immediately. Nothing is re-downloaded on subsequent runs:
+immediately. It also probes the model cache and warns loudly if the model
+is missing, so you know to run `python3 download_model.py` before speaking.
+Nothing is re-downloaded on subsequent runs:
 
 - Python deps live in `.venv/` and are only touched when `requirements.txt`
   imports fail (first run, or after they change).
 - The Whisper model is downloaded **exactly once**, with a visible progress
-  bar (`python download_model.py` does the same thing manually), into
+  bar (`python3 download_model.py` does the same thing manually), into
   `~/.cache/huggingface/` — **outside the repo**. `git pull`, `rm -rf .venv`,
   even a fresh re-clone never re-download it. The worker also loads the
   model straight from disk (offline-fast, no hub checks) once cached.
 - The Svelte UI is rebuilt only when UI sources changed since the last build.
+
+### One-off model commands
+
+```bash
+python3 download_model.py            # download default model (small)
+python3 download_model.py tiny        # override model just for this run
+python3 download_model.py --status    # check if cached (no download, exits 0/1)
+```
+
+`download_model.py` is self-bootstrapping: if `huggingface_hub` / `tqdm` are
+missing it installs them on demand, so it works on a bare system Python too
+(no need to activate the venv first).
 
 To stop everything:
 
@@ -162,18 +184,21 @@ can load them as practice reference).
 ### 4. `/logs` — Logs
 Everything the stack prints, in one place:
 
+- **Aggregate stats** — total assessments, audio seconds, running averages
+  (from the worker's in-memory store; only when the worker is running).
 - **System log** — the runtime log of manager + worker, parsed from
   `logs/languageshadow.log` with level colours (red = error, yellow =
-  warning). Filter by source, auto-refresh every 2.5 s (pausable), copy
-  or download the visible tail. Read straight from disk, so it works even
-  while the worker is stopped.
-- **Worker console** — the raw stdout/stderr of the worker captured to
+  warning). Filter by source (all / manager / worker / system), auto-refresh
+  every 3 s (pausable). Read straight from disk, so it works even while the
+  worker is stopped — exactly what you need when debugging a worker that
+  won't start.
+- **Worker stdout** — the raw stdout/stderr of the worker captured to
   `logs/worker.out`. This is where startup crashes land (import errors,
   missing model files, …) — previously that output went to /dev/null and
   a dead worker looked like a mystery.
-- **Practice history** — every scored attempt (from the worker's
-  in-memory store; resets when the worker is idle-killed or the machine
-  reboots).
+- **Recent assessments** — every scored attempt in a compact table
+  (time, language, overall / accuracy / fluency / reference snippet).
+  Resets when the worker is idle-killed.
 
 ---
 
@@ -316,7 +341,8 @@ languageshadow/
 │   │   │   ├── +page.svelte    # Home
 │   │   │   ├── live/+page.svelte
 │   │   │   ├── read/+page.svelte
-│   │   │   └── youtube/+page.svelte
+│   │   │   ├── youtube/+page.svelte
+│   │   │   └── logs/+page.svelte   # system logs + worker stdout + practice history
 │   │   └── lib/
 │   │       ├── api.ts           # REST client (port 8765)
 │   │       ├── recorder.ts      # AudioWorklet recorder + WS session
@@ -347,15 +373,30 @@ languageshadow/
 **Microphone not working on Arch / Hyprland** — make sure you're in the
 `audio` group and pipewire is running. Test with `pw-record --list-targets`.
 
-**Worker won't start** — check `logs/languageshadow.log`. Most common cause
-is missing model download (run `./setup.sh` again) or another process
-holding port 8000 (`ss -ltnp | grep 8000`).
+**Worker won't start** — check `logs/languageshadow.log` (or the `/logs`
+page in the UI). Most common cause is a missing model download. Run
+`python3 download_model.py --status` to check; if not cached, run
+`python3 download_model.py` to fetch it. Another common cause is another
+process holding port 8000 (`ss -ltnp | grep 8000`).
+
+**`ModuleNotFoundError: No module named 'huggingface_hub'`** — fixed.
+`download_model.py` now self-installs `huggingface_hub` + `tqdm` on demand,
+and they are also pinned in `requirements.txt` so a normal `./setup.sh`
+install already has them. Just `git pull` and re-run
+`python3 download_model.py`.
+
+**WebSocket / Live Caption: `finalize transcribe failed: model not loaded`** —
+fixed. The WS path now loads the model before sending `ready`, so a cold
+worker start no longer hits this on the first chunk. If you still see it,
+run `python3 download_model.py` — the model is probably not cached and the
+network is unavailable.
 
 **Model download shows no progress / I want to check the cache** — run
-`python download_model.py` manually: it prints file sizes, shows progress
-bars, and skips instantly (0 MB) when the model is already cached. The
-cache lives in `~/.cache/huggingface/hub/models--Systran--faster-whisper-*`.
-To force a re-download of the current model, delete that folder.
+`python3 download_model.py --status` (just probes the cache, no download) or
+`python3 download_model.py` (prints file sizes, shows progress bars, and
+skips instantly — 0 MB — when the model is already cached). The cache lives
+in `~/.cache/huggingface/hub/models--Systran--faster-whisper-*`. To force a
+re-download of the current model, delete that folder.
 
 **`TypeError: incompatible constructor arguments` from ctranslate2** — fixed
 in this version (it was `cpu_threads=None` being passed when `LS_THREADS=0`).
@@ -365,7 +406,9 @@ in this version (it was `cpu_threads=None` being passed when `LS_THREADS=0`).
 checkout with pinned versions. `git pull` and delete the stale venv so it is
 recreated with the relaxed pins: `rm -rf .venv && ./setup.sh`.
 
-**UI shows "not built" message** — run `./setup.sh` (or just `cd ui && npm install && npm run build`).
+**UI shows "not built" message or `/logs` returns 404** — run `./setup.sh`
+(or just `cd ui && npm install && npm run build`). The `/logs` route was
+added in this version; if your `ui/build/` is stale you'll see a 404.
 
 **Extension can't reach the API** — check `curl http://127.0.0.1:8000/health`
 returns 200. If not, start the worker: `curl -X POST http://127.0.0.1:8765/manager/start`.

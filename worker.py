@@ -551,6 +551,31 @@ async def ws_transcribe(ws: WebSocket) -> None:
         live_scoring=cfg.get("live_scoring", True),
         target_language=cfg.get("target_language", config.DEFAULT_LANGUAGE),
     )
+
+    # IMPORTANT: ensure the Whisper model is loaded BEFORE we send 'ready'.
+    # The WS path calls _transcribe() directly (which uses model_holder._model),
+    # so without this the first chunk after a cold worker start hits
+    # "RuntimeError: model not loaded" — exactly the bug we saw in
+    # languageshadow.log (finalize transcribe failed: model not loaded).
+    # If the model is not cached AND there is no network, fail loudly here
+    # so the browser sees a clear error instead of a silent stall.
+    try:
+        await model_holder.get()
+    except Exception as e:
+        log.exception("ws: model load failed: %s", e)
+        try:
+            await ws.send_text(json.dumps({
+                "type": "error",
+                "session_id": session.session_id,
+                "error": f"model load failed: {e}",
+                "hint": "Run `python3 download_model.py` to fetch the Whisper "
+                        "model, then restart the worker.",
+            }))
+        except Exception:
+            pass
+        await ws.close(code=1011)
+        return
+
     await ws.send_text(json.dumps({
         "type": "ready",
         "session_id": session.session_id,

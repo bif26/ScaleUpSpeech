@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 Download the Whisper model ONCE, with visible progress.
 
@@ -18,15 +18,37 @@ This script makes the download explicit and bounded:
   * finishes by loading the model straight from disk (zero network) to
     prove the install works before setup continues
 
+Self-bootstrap
+--------------
+This script is the ONLY piece of the project that needs huggingface_hub +
+tqdm. They are not imported anywhere else in the codebase, so we install
+them on demand here (into the same interpreter that runs the script) instead
+of forcing them into requirements.txt for every user. That way:
+
+  python3 download_model.py            # works on a bare system Python too
+  .venv/bin/python download_model.py   # works inside the project venv
+
+Separated from ./setup.sh
+-------------------------
+setup.sh no longer runs this script automatically. Users with slow internet
+should run it manually ONCE after `./setup.sh` and before `./start_manager.sh`:
+
+    ./setup.sh                 # installs python + node deps (no model)
+    python3 download_model.py  # <-- separate step, run when you have time
+    ./start_manager.sh         # starts the manager; worker works offline
+
 Usage:
-    python download_model.py            # uses LS_MODEL / config.py (default: small)
-    python download_model.py tiny       # override model just for this run
+    python3 download_model.py            # uses LS_MODEL / config.py (default: small)
+    python3 download_model.py tiny       # override model just for this run
+    python3 download_model.py --status   # only check if cached, never download
+    python3 download_model.py --check    # alias for --status
 """
 
 from __future__ import annotations
 
 import os
 import sys
+import subprocess
 
 # Force progress bars ON before huggingface_hub is imported: some machines
 # export HF_HUB_DISABLE_PROGRESS_BARS=1 globally, which makes the download
@@ -35,10 +57,6 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 
 import fnmatch  # noqa: E402
 from pathlib import Path  # noqa: E402
-
-import config  # noqa: E402  (repo shared config - resolves LS_MODEL etc.)
-
-from tqdm.auto import tqdm  # noqa: E402
 
 # EXACTLY the file set faster-whisper's own download_model() fetches — so the
 # cache this script fills is byte-for-byte the cache WhisperModel() expects.
@@ -51,6 +69,85 @@ ALLOW_PATTERNS = [
     "tokenizer.json",
     "vocabulary.*",
 ]
+
+# Heavy deps this script (and only this script) needs. We install them on
+# demand so the bare system Python works too — and so setup.sh does not have
+# to install them for users who never download a model through us.
+_BOOTSTRAP_DEPS = ["huggingface_hub>=0.23.0", "tqdm>=4.66.0"]
+
+
+def _in_venv() -> bool:
+    """True when running inside a venv (so pip targets that venv, not --user)."""
+    return sys.prefix != sys.base_prefix
+
+
+def _pip_install_missing(packages: list[str]) -> None:
+    """Install `packages` into the current interpreter if missing.
+
+    Works for: system python (uses --user), venv python (uses the venv pip).
+    Prints a clear error and exits if pip itself is unavailable.
+    """
+    # Defer the actual import test to caller — we just install here.
+    pip_args = [sys.executable, "-m", "pip", "install", "--upgrade"]
+    if not _in_venv():
+        # System Python: don't pollute system site-packages, use --user.
+        pip_args.append("--user")
+    pip_args.extend(packages)
+    print("  Installing model-download dependencies (one-time):")
+    print(f"    {' '.join(pip_args)}")
+    try:
+        subprocess.check_call(pip_args)
+    except subprocess.CalledProcessError as e:
+        print("", file=sys.stderr)
+        print("ERROR: could not install huggingface_hub + tqdm.", file=sys.stderr)
+        print("       The Whisper model download needs these packages.", file=sys.stderr)
+        print("       Fix manually with:", file=sys.stderr)
+        print(f"         {' '.join(pip_args)}", file=sys.stderr)
+        print("       Then re-run: python3 download_model.py", file=sys.stderr)
+        sys.exit(2)
+    except FileNotFoundError:
+        print("ERROR: pip is not available for this Python interpreter.", file=sys.stderr)
+        print(f"       Install pip first, then re-run: {sys.executable} -m pip --version",
+              file=sys.stderr)
+        sys.exit(2)
+
+
+def _ensure_bootstrap_deps() -> None:
+    """Import huggingface_hub + tqdm; install them on demand if missing.
+
+    Re-executes the script after installing so the freshly installed packages
+    are visible to the same process (sys.path only refreshes on import for
+    some setups).
+    """
+    missing: list[str] = []
+    try:
+        import huggingface_hub  # noqa: F401
+    except ImportError:
+        missing.append("huggingface_hub>=0.23.0")
+    try:
+        import tqdm  # noqa: F401
+    except ImportError:
+        missing.append("tqdm>=4.66.0")
+
+    if not missing:
+        return
+
+    print("  Model-download dependencies missing — installing them now (one-time).")
+    _pip_install_missing(missing)
+
+    # Re-exec so the new packages are picked up cleanly. os.execv replaces the
+    # current process — same args, same stdout/stderr, just fresh sys.path.
+    print("  Re-launching after install...")
+    os.execv(sys.executable, [sys.executable, *sys.argv])
+
+
+# --------------------------------------------------------------------------- #
+# From this point on, huggingface_hub and tqdm are guaranteed to be importable. #
+# --------------------------------------------------------------------------- #
+
+import config  # noqa: E402  (repo shared config - resolves LS_MODEL etc.)
+
+from tqdm.auto import tqdm  # noqa: E402
 
 
 def _repo_id_for(model_name: str) -> str:
@@ -167,13 +264,27 @@ def _load_from_disk(model_path: str) -> None:
 
 
 def main() -> int:
-    model_name = sys.argv[1] if len(sys.argv) > 1 else config.MODEL_NAME
+    args = [a for a in sys.argv[1:] if not a.startswith("-")]
+    status_only = any(a in ("--status", "--check") for a in sys.argv[1:])
+
+    model_name = args[0] if args else config.MODEL_NAME
     repo_id = _repo_id_for(model_name)
     hf_home = os.environ.get("HF_HOME", "~/.cache/huggingface")
 
     print(f"  Model     : {model_name}")
     print(f"  Repo      : {repo_id}")
     print(f"  Cache dir : {hf_home}/hub  (outside this repo -> never re-downloaded)")
+
+    if status_only:
+        # Pure status check: skip the verification load too, just probe cache.
+        hit = _cache_hit(repo_id)
+        if hit:
+            print("  STATUS    : CACHED (no download needed)")
+            print(f"  Path      : {hit}")
+            return 0
+        print("  STATUS    : NOT CACHED")
+        print("  Run `python3 download_model.py` (no flags) to download it now.")
+        return 1
 
     _enable_progress_bars()
 
@@ -202,4 +313,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    # Ensure deps BEFORE parsing args, so --status works on a bare system too.
+    _ensure_bootstrap_deps()
     sys.exit(main())

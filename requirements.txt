@@ -21,4 +21,10 @@ numpy>=1.26.4
 psutil>=5.9.8
 rapidfuzz>=3.7.0
 phonetics>=1.0.5
+# Model-download deps. download_model.py also auto-installs these on demand
+# (so it works on a bare system Python too), but pinning them here means a
+# normal `./setup.sh` install already has them — no surprise pip install
+# when the user later runs `python3 download_model.py` separately.
+huggingface_hub>=0.23.0
+tqdm>=4.66.0
 uvloop>=0.19.0; platform_system != "Windows" and python_version < "3.14"

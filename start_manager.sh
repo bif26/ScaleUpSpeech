@@ -6,6 +6,11 @@
 # This is your EVERYDAY command. If the venv or dependencies are missing it
 # runs ./setup.sh once (which itself skips anything already done); once
 # installed, starting is instant — no downloads, no reinstalls.
+#
+# The Whisper model download is intentionally NOT part of setup.sh. We probe
+# the cache here and warn loudly if the model is missing, because the worker
+# cannot transcribe without it (and silently auto-downloading on first use
+# is exactly the slow-internet trap the user is trying to avoid).
 
 cd "$(dirname "$0")"
 VENV=".venv"
@@ -16,6 +21,30 @@ if [ ! -x "$PY" ] || ! "$PY" -c "import fastapi, uvicorn, websockets, httpx, \
 pydantic, faster_whisper, numpy, psutil, rapidfuzz, phonetics" >/dev/null 2>&1; then
   echo "First run (or dependencies missing) — running ./setup.sh once..."
   ./setup.sh
+fi
+
+# Probe the Whisper model cache. The worker can technically auto-download on
+# first request, but that is exactly the silent, slow, looks-like-it-hung
+# behaviour we are trying to avoid. Warn explicitly so the user knows what
+# to do.
+echo "Checking Whisper model cache..."
+if "$PY" download_model.py --status >/dev/null 2>&1; then
+  echo "  Model is cached — worker will start offline."
+else
+  echo "  ┌──────────────────────────────────────────────────────────────────┐"
+  echo "  │ WARNING: Whisper model is NOT cached yet.                       │"
+  echo "  │                                                                  │"
+  echo "  │ The worker cannot transcribe without it. On first use it would   │"
+  echo "  │ silently download ~500 MB (or more), which on a slow connection  │"
+  echo "  │ looks like the app is frozen.                                    │"
+  echo "  │                                                                  │"
+  echo "  │ Run this ONE-TIME command now, when you have time:               │"
+  echo "  │     python3 download_model.py                                    │"
+  echo "  │                                                                  │"
+  echo "  │ It shows progress bars + per-file sizes and only ever runs once   │"
+  echo "  │ (the cache lives in ~/.cache/huggingface, survives git pull and  │"
+  echo "  │ even a fresh re-clone).                                          │"
+  echo "  └──────────────────────────────────────────────────────────────────┘"
 fi
 
 mkdir -p logs

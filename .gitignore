@@ -12,7 +12,7 @@ env/
 .eggs/
 
 # Logs and runtime
-logs/
+/logs/
 *.log
 *.out
 *.pid
