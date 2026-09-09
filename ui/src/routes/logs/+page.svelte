@@ -7,7 +7,7 @@
   import { apiClient } from '$lib/api';
   import { health } from '$lib/stores/health';
   import { onMount } from 'svelte';
-  import RefreshIcon from 'lucide-svelte/icons/refresh';
+  import RefreshIcon from 'lucide-svelte/icons/refresh-cw';
   import PauseIcon from 'lucide-svelte/icons/pause';
   import PlayIcon from 'lucide-svelte/icons/play';
   import DownloadIcon from 'lucide-svelte/icons/download';
