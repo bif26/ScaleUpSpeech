@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+*.egg-info/
+.eggs/
+
+# Logs and runtime
+logs/
+*.log
+*.out
+*.pid
+
+# Models / downloads (faster-whisper caches models in ~/.cache by default,
+# but if you change HF_HOME these may land here)
+models/
+*.bin
+*.pt
+*.gguf
+
+# Test artifacts
+test*.webm
+test*.wav
+test*.ogg
+temp_*.wav
+user_practice_attempt.*
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Build / package
+dist/
+build/

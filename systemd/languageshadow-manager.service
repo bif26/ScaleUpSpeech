@@ -1,0 +1,18 @@
+[Unit]
+Description=LanguageShadow Manager (lightweight always-on controller)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+# CHANGE THIS PATH to your real install location
+WorkingDirectory=/path/to/languageshadow
+ExecStart=/path/to/languageshadow/.venv/bin/python /path/to/languageshadow/manager.py
+Restart=on-failure
+RestartSec=3
+# Keep the manager modest; the worker is allowed more.
+MemoryMax=300M
+Nice=5
+
+[Install]
+WantedBy=default.target

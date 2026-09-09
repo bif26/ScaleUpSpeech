@@ -1,0 +1,12 @@
+{
+  "name": "Deutsch",
+  "whisper_lang_code": "de",
+  "fluency_ideal_wpm_min": 100,
+  "fluency_ideal_wpm_max": 180,
+  "coach_tips": {
+    "low_accuracy": "Sprich jedes Wort deutlich. Achte auf die Mitlaute.",
+    "low_fluency_slow": "Versuche ein gleichmäßigeres Tempo.",
+    "low_fluency_fast": "Atme zwischen den Sätzen und sprich ruhiger.",
+    "high_score": "Sehr gut! Versuche einen längeren Text."
+  }
+}

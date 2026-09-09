@@ -1,0 +1,12 @@
+{
+  "name": "Spanish",
+  "whisper_lang_code": "es",
+  "fluency_ideal_wpm_min": 110,
+  "fluency_ideal_wpm_max": 200,
+  "coach_tips": {
+    "low_accuracy": "Pronuncia cada sílaba. Vuelve a escuchar la frase de referencia.",
+    "low_fluency_slow": "Habitla un poco más rápido para mejorar el ritmo.",
+    "low_fluency_fast": "Habla un poco más lento para que cada palabra sea clara.",
+    "high_score": "Excelente. Prueba con un pasaje más largo."
+  }
+}

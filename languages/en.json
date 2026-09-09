@@ -1,0 +1,12 @@
+{
+  "name": "English",
+  "whisper_lang_code": "en",
+  "fluency_ideal_wpm_min": 100,
+  "fluency_ideal_wpm_max": 180,
+  "coach_tips": {
+    "low_accuracy": "Slow down and aim each word. Try to pronounce every consonant clearly.",
+    "low_fluency_slow": "You're speaking a bit slowly. Try to keep a steadier pace.",
+    "low_fluency_fast": "You're speaking a bit fast. Take a breath between phrases.",
+    "high_score": "Excellent work! Try a longer passage next."
+  }
+}

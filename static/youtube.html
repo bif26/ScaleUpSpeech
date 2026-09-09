@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>YouTube Helper · LanguageShadow</title>
+<link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot" id="status-dot"></span><span>LanguageShadow</span></div>
+    <div class="right">
+      <span class="ram-pill" id="ram-pill">— MB</span>
+      <button class="ghost" id="btn-start-worker" title="Start the AI worker">Start AI</button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <nav>
+      <a href="/">Home</a>
+      <a href="/live">Live Caption</a>
+      <a href="/read">Read Text</a>
+      <a href="/youtube" class="active">YouTube Helper</a>
+    </nav>
+  </aside>
+
+  <main>
+    <h1>YouTube Helper</h1>
+    <p class="subtitle">Shadow what people say in YouTube videos. The browser extension captures the captions and pipes them here.</p>
+
+    <div class="card">
+      <h2>How it works</h2>
+      <ol style="padding-left:20px; line-height:1.8;">
+        <li>Install the LanguageShadow extension (Manifest V3, Chrome/Chromium/Firefox compatible).</li>
+        <li>Open any YouTube video that has captions (auto or manual).</li>
+        <li>Click the extension icon and toggle "Send captions to LanguageShadow".</li>
+        <li>Come back to this page — the latest captions appear below.</li>
+        <li>Click "Use as reference" to load them into the Read Text mode, then speak along with the video.</li>
+      </ol>
+      <p class="muted mt-2">No audio is uploaded. The extension only reads the on-screen caption text, sends it to <code>127.0.0.1:8765</code>, and LanguageShadow stores the last 50 lines locally in your browser.</p>
+    </div>
+
+    <div class="card">
+      <h2>Extension installation</h2>
+      <ol style="padding-left:20px; line-height:1.8;">
+        <li>Open <code>chrome://extensions</code> (or <code>about:addons</code> in Firefox, then "Debug Add-ons").</li>
+        <li>Enable Developer mode.</li>
+        <li>Click "Load unpacked" and select the <code>extension/</code> folder inside LanguageShadow.</li>
+        <li>The extension should appear in your toolbar.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>Live captions from extension</h2>
+      <div class="row between">
+        <div class="muted" id="ext-status">Extension not connected yet.</div>
+        <button class="ghost" id="btn-clear">Clear</button>
+      </div>
+      <div id="caption-list" class="mt-3" style="font-family: var(--mono); font-size: 14px; line-height: 1.7; max-height: 280px; overflow-y: auto;"></div>
+      <div class="row mt-3 gap-3">
+        <button class="primary" id="btn-use-as-ref">Use as reference (Read Text)</button>
+        <button id="btn-use-as-live">Use as reference (Live Caption)</button>
+      </div>
+    </div>
+
+    <div class="card" id="preview-card" style="display: none;">
+      <h2>Loaded reference</h2>
+      <textarea id="reference-text" rows="6" class="mono"></textarea>
+      <div class="row mt-3 gap-3">
+        <a href="/read" class="btn">Open Read Text</a>
+        <a href="/live" class="btn">Open Live Caption</a>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+(function () {
+  const dot = document.getElementById('status-dot');
+  const ramPill = document.getElementById('ram-pill');
+  const captionList = document.getElementById('caption-list');
+  const extStatus = document.getElementById('ext-status');
+  const previewCard = document.getElementById('preview-card');
+  const refText = document.getElementById('reference-text');
+  const btnClear = document.getElementById('btn-clear');
+  const btnUseAsRef = document.getElementById('btn-use-as-ref');
+  const btnUseAsLive = document.getElementById('btn-use-as-live');
+
+  LS.onStatus(s => {
+    const w = s.worker || {};
+    dot.className = 'brand-dot ' + (w.state === 'RUNNING' ? 'running' : w.state === 'FROZEN' ? 'frozen' : '');
+    ramPill.textContent = `${(s.manager.rss_mb||0)+(w.rss_mb||0)} MB / ${s.ram_budget_mb} MB`;
+  });
+  document.getElementById('btn-start-worker').onclick = async () => {
+    try { await LS.api('/manager/start', 'POST'); LS.toast('Starting AI worker…'); }
+    catch (e) { LS.toast('Failed: ' + e.message, 'error'); }
+  };
+
+  const STORE_KEY = 'ls.captions';
+  function loadCaptions() {
+    try { return JSON.parse(localStorage.getItem(STORE_KEY) || '[]'); } catch { return []; }
+  }
+  function saveCaptions(arr) {
+    localStorage.setItem(STORE_KEY, JSON.stringify(arr.slice(-50)));
+  }
+  function renderCaptions() {
+    const arr = loadCaptions();
+    if (!arr.length) {
+      captionList.innerHTML = '<div class="muted">No captions yet. Open a YouTube video and enable the extension.</div>';
+      extStatus.textContent = 'Extension not connected yet.';
+      return;
+    }
+    extStatus.textContent = `${arr.length} caption lines captured · last update ${new Date(arr[arr.length-1].ts).toLocaleTimeString()}`;
+    captionList.innerHTML = arr.slice().reverse().map(c => `
+      <div class="row gap-3" style="margin-bottom:6px;">
+        <span class="muted" style="font-family:var(--mono); font-size:11px; min-width:48px;">${new Date(c.ts).toLocaleTimeString().slice(0,8)}</span>
+        <span>${escapeHtml(c.text)}</span>
+      </div>
+    `).join('');
+  }
+  function escapeHtml(s) {
+    return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  }
+
+  // Poll for captions posted by the extension (it POSTs to /api/caption)
+  let lastTs = 0;
+  async function pollCaptions() {
+    try {
+      const r = await LS.api('/api/captions?since=' + lastTs);
+      if (r && r.captions && r.captions.length) {
+        const arr = loadCaptions();
+        for (const c of r.captions) { arr.push(c); lastTs = Math.max(lastTs, c.ts); }
+        saveCaptions(arr);
+        renderCaptions();
+      }
+    } catch (e) {}
+  }
+  setInterval(pollCaptions, 1500);
+  renderCaptions();
+
+  btnClear.onclick = () => {
+    localStorage.removeItem(STORE_KEY);
+    lastTs = Math.floor(Date.now() / 1000);
+    renderCaptions();
+  };
+
+  function buildReference() {
+    const arr = loadCaptions();
+    if (!arr.length) { LS.toast('No captions captured yet', 'error'); return null; }
+    // Take the last 30 lines and merge into one paragraph.
+    return arr.slice(-30).map(c => c.text).join(' ').replace(/\s+/g, ' ').trim();
+  }
+  btnUseAsRef.onclick = () => {
+    const text = buildReference();
+    if (!text) return;
+    sessionStorage.setItem('ls.reference', text);
+    sessionStorage.setItem('ls.target', 'read');
+    location.href = '/read';
+  };
+  btnUseAsLive.onclick = () => {
+    const text = buildReference();
+    if (!text) return;
+    sessionStorage.setItem('ls.reference', text);
+    sessionStorage.setItem('ls.target', 'live');
+    location.href = '/live';
+  };
+
+  // If we arrived here via a redirect with a reference, show it.
+  const preloaded = sessionStorage.getItem('ls.reference');
+  if (preloaded) {
+    previewCard.style.display = 'block';
+    refText.value = preloaded;
+    sessionStorage.removeItem('ls.reference');
+  }
+})();
+</script>
+</body>
+</html>

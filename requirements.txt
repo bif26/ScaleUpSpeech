@@ -1,0 +1,11 @@
+fastapi==0.110.0
+uvicorn==0.29.0
+websockets==12.0
+httpx==0.27.0
+pydantic==2.6.4
+faster-whisper==1.2.1
+numpy>=1.26.4
+psutil==5.9.8
+rapidfuzz==3.7.0
+phonetics==1.0.5
+uvloop==0.19.0; platform_system != "Windows"

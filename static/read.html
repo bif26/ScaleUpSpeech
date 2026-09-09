@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Read Text · LanguageShadow</title>
+<link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="brand"><span class="brand-dot" id="status-dot"></span><span>LanguageShadow</span></div>
+    <div class="right">
+      <span class="ram-pill" id="ram-pill">— MB</span>
+      <button class="ghost" id="btn-start-worker" title="Start the AI worker">Start AI</button>
+    </div>
+  </header>
+
+  <aside class="sidebar">
+    <nav>
+      <a href="/">Home</a>
+      <a href="/live">Live Caption</a>
+      <a href="/read" class="active">Read Text</a>
+      <a href="/youtube">YouTube Helper</a>
+    </nav>
+  </aside>
+
+  <main>
+    <h1>Read Text</h1>
+    <p class="subtitle">Paste a passage from a book, click Start, and read it aloud. Get your score at the end.</p>
+
+    <div class="card">
+      <h2>Passage to read</h2>
+      <textarea id="reference" rows="6" class="mono" placeholder="Paste a passage from a book, news article, or any text…">It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity.</textarea>
+      <div class="row mt-3 gap-3">
+        <div>
+          <label>Language</label>
+          <select id="language">
+            <option value="en">English</option>
+            <option value="es">Spanish</option>
+            <option value="de">German</option>
+            <option value="ar">Arabic</option>
+            <option value="auto">Auto-detect</option>
+          </select>
+        </div>
+        <div>
+          <label>Live scoring</label>
+          <select id="live-mode">
+            <option value="off" selected>Off (score at end)</option>
+            <option value="on">On (live score as I speak)</option>
+          </select>
+        </div>
+        <div style="flex:1;"></div>
+        <div style="align-self: flex-end;">
+          <button class="primary" id="btn-record">Start reading</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Settings</h2>
+      <div class="slider-row">
+        <label>Target WPM (min)</label>
+        <input type="range" class="slider-input" id="target-wpm" min="40" max="180" step="5" value="110" />
+        <span class="slider-value" id="target-wpm-val">110</span>
+      </div>
+      <div class="slider-row">
+        <label>Pause threshold (s)</label>
+        <input type="range" class="slider-input" id="pause-thr" min="0.4" max="2.5" step="0.1" value="1.1" />
+        <span class="slider-value" id="pause-thr-val">1.1s</span>
+      </div>
+      <div class="muted">Smaller pause threshold = stricter hesitation detection. Lower target WPM = more lenient fluency scoring.</div>
+    </div>
+
+    <div class="record-bar" id="record-bar">
+      <span class="pulse"></span>
+      <span class="timer" id="timer">0:00</span>
+      <div style="flex:1;"></div>
+      <span class="muted" id="state-text">Idle</span>
+      <div class="vu" style="flex: 0 0 200px;"><div class="vu-fill" id="vu-fill"></div></div>
+    </div>
+
+    <div class="card">
+      <h2>Reading progress</h2>
+      <div class="words-display" id="words"></div>
+    </div>
+
+    <div class="card" id="result-card" style="display: none;">
+      <h2>Result</h2>
+      <div class="row between" style="margin-bottom: 14px;">
+        <div>
+          <div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.06em;">Overall</div>
+          <div style="font-family: var(--mono); font-size: 38px; font-weight: 600;" id="s-overall">—</div>
+        </div>
+        <div class="cefr-badge" id="cefr-badge">—</div>
+        <div>
+          <div class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.06em;">Pace</div>
+          <div style="font-family: var(--mono); font-size: 20px;"><span id="s-wpm">—</span> wpm · <span id="s-dur">—</span></div>
+        </div>
+      </div>
+      <div class="subscore-grid" id="subscore-grid"></div>
+      <h2 class="mt-4">Words</h2>
+      <div class="words-chip-display" id="word-chips"></div>
+      <div class="muted mt-2" id="recognized-line"></div>
+    </div>
+
+    <div class="card" id="summary-card" style="display: none;">
+      <h2>Breakdown</h2>
+      <div class="row gap-4">
+        <span class="pill green">matched: <strong id="n-correct">0</strong></span>
+        <span class="pill red">mispronounced: <strong id="n-sub">0</strong></span>
+        <span class="pill yellow">inserted: <strong id="n-ins">0</strong></span>
+        <span class="pill">omitted: <strong id="n-del">0</strong></span>
+        <span class="pill blue">pauses: <strong id="n-pauses">0</strong></span>
+      </div>
+    </div>
+
+    <div class="card" id="recent-card">
+      <h2>Recent attempts</h2>
+      <div id="recent-list"><div class="muted">Loading…</div></div>
+    </div>
+  </main>
+</div>
+
+<script src="/static/js/common.js"></script>
+<script>
+(function () {
+  const dot = document.getElementById('status-dot');
+  const ramPill = document.getElementById('ram-pill');
+  const refEl = document.getElementById('reference');
+  const langEl = document.getElementById('language');
+  const liveEl = document.getElementById('live-mode');
+  const btn = document.getElementById('btn-record');
+  const bar = document.getElementById('record-bar');
+  const timerEl = document.getElementById('timer');
+  const stateEl = document.getElementById('state-text');
+  const wordsEl = document.getElementById('words');
+  const vuFill = document.getElementById('vu-fill');
+
+  // Settings sliders.
+  const targetWpm = document.getElementById('target-wpm');
+  const targetWpmVal = document.getElementById('target-wpm-val');
+  const pauseThr = document.getElementById('pause-thr');
+  const pauseThrVal = document.getElementById('pause-thr-val');
+  LS.bindSlider(targetWpm, targetWpmVal, v => v + '');
+  LS.bindSlider(pauseThr, pauseThrVal, v => v.toFixed(1) + 's');
+
+  // Result card.
+  const resultCard = document.getElementById('result-card');
+  const sOverall = document.getElementById('s-overall');
+  const sWpm = document.getElementById('s-wpm');
+  const sDur = document.getElementById('s-dur');
+  const cefrBadge = document.getElementById('cefr-badge');
+  const subscoreGrid = document.getElementById('subscore-grid');
+  const wordChips = document.getElementById('word-chips');
+  const recognizedLine = document.getElementById('recognized-line');
+
+  // Summary card.
+  const summaryCard = document.getElementById('summary-card');
+  const nCorrect = document.getElementById('n-correct');
+  const nSub = document.getElementById('n-sub');
+  const nIns = document.getElementById('n-ins');
+  const nDel = document.getElementById('n-del');
+  const nPauses = document.getElementById('n-pauses');
+  const recentList = document.getElementById('recent-list');
+
+  let recording = false;
+  let recorder = null;
+  let session = null;
+  let startTs = 0;
+  let timerHandle = null;
+  let referenceWords = [];
+
+  function tokenize(t) {
+    return (t.match(/[A-Za-z0-9']+(?:[-][A-Za-z0-9']+)*/g) || []).map(w => w.toLowerCase());
+  }
+  function refreshReferenceWords() {
+    referenceWords = tokenize(refEl.value);
+    if (!recording) LS.renderPending(wordsEl, referenceWords);
+  }
+  refEl.addEventListener('input', refreshReferenceWords);
+  const preloaded = sessionStorage.getItem('ls.reference');
+  if (preloaded) {
+    refEl.value = preloaded;
+    sessionStorage.removeItem('ls.reference');
+    sessionStorage.removeItem('ls.target');
+  }
+  refreshReferenceWords();
+
+  LS.onStatus(s => {
+    const w = s.worker || {};
+    dot.className = 'brand-dot ' + (w.state === 'RUNNING' ? 'running' : w.state === 'FROZEN' ? 'frozen' : '');
+    ramPill.textContent = `${(s.manager.rss_mb||0)+(w.rss_mb||0)} MB / ${s.ram_budget_mb} MB`;
+  });
+  document.getElementById('btn-start-worker').onclick = async () => {
+    try { await LS.api('/manager/start', 'POST'); LS.toast('Starting AI worker…'); }
+    catch (e) { LS.toast('Failed: ' + e.message, 'error'); }
+  };
+
+  function setRecording(r) {
+    recording = r;
+    bar.classList.toggle('recording', r);
+    btn.textContent = r ? 'Stop & score' : 'Start reading';
+    btn.classList.toggle('danger', r);
+    btn.classList.toggle('primary', !r);
+  }
+  function startTimer() {
+    startTs = Date.now();
+    timerHandle = setInterval(() => {
+      timerEl.textContent = LS.fmtTime((Date.now() - startTs) / 1000);
+    }, 250);
+  }
+  function stopTimer() { if (timerHandle) { clearInterval(timerHandle); timerHandle = null; } }
+
+  async function start() {
+    if (!refEl.value.trim()) { LS.toast('Paste a passage first', 'error'); return; }
+    refreshReferenceWords();
+    setRecording(true);
+    stateEl.textContent = 'waiting for AI worker…';
+    resultCard.style.display = 'none';
+    summaryCard.style.display = 'none';
+
+    try { await LS.api('/manager/start', 'POST'); } catch {}
+
+    recorder = new LS.Recorder();
+    recorder.onChunk = (pcm) => { if (session) session.sendPcm(pcm); };
+    recorder.onLevel = (rms) => {
+      const pct = Math.min(100, rms * 300);
+      vuFill.style.width = pct + '%';
+    };
+
+    try { await recorder.start(); }
+    catch (e) { LS.toast('Microphone failed: ' + e.message, 'error'); setRecording(false); return; }
+
+    session = new LS.TranscribeSession({
+      referenceText: refEl.value,
+      liveScoring: liveEl.value === 'on',
+      language: langEl.value,
+      onMsg: (data) => {
+        if (!data || !data.type) return;
+        if (data.type === 'incremental') {
+          stateEl.textContent = `${data.words_spoken}/${data.words_total} words · ${data.accuracy}%`;
+          LS.renderWords(wordsEl, referenceWords, data.verdicts);
+        } else if (data.type === 'final') {
+          handleFinal(data);
+        }
+      },
+      onClose: () => {},
+    });
+    try {
+      await session.open();
+      stateEl.textContent = 'Reading…';
+      startTimer();
+    } catch (e) {
+      LS.toast('Connection failed: ' + e.message, 'error');
+      setRecording(false); stopTimer();
+      await recorder.stop(); recorder = null;
+    }
+  }
+
+  async function stop() {
+    setRecording(false);
+    stopTimer();
+    stateEl.textContent = 'Scoring…';
+    if (session) session.end();
+    if (recorder) await recorder.stop();
+    recorder = null;
+    vuFill.style.width = '0%';
+  }
+
+  function handleFinal(data) {
+    if (session) { try { session.close(); } catch {} session = null; }
+    stateEl.textContent = 'Done';
+    if (data.status && data.status !== 'OK') {
+      LS.toast(data.error || 'scoring failed', 'error');
+      stateEl.textContent = 'Error: ' + (data.error || 'unknown');
+      return;
+    }
+    resultCard.style.display = 'block';
+    const overall = data.overall || 0;
+    sOverall.textContent = overall.toFixed(0);
+    sOverall.className = LS.scoreColor(overall);
+    sWpm.textContent = (data.pace && data.pace.wpm) || 0;
+    sDur.textContent = LS.fmtTime(((data.pace && data.pace.duration_ms) || 0) / 1000);
+    if (data.cefr) {
+      cefrBadge.textContent = data.cefr;
+      cefrBadge.className = 'cefr-badge ' + LS.cefrBadgeClass(data.cefr);
+    } else {
+      cefrBadge.textContent = '—';
+      cefrBadge.className = 'cefr-badge';
+    }
+    LS.renderSubscores(subscoreGrid, data.subscores || {});
+    LS.renderWordChips(wordChips, data.words || []);
+    recognizedLine.textContent = 'Heard: ' + (data.recognized || '');
+
+    summaryCard.style.display = 'block';
+    nCorrect.textContent = data.n_matched || 0;
+    nSub.textContent = data.n_mispronounced || 0;
+    nIns.textContent = data.n_inserted || 0;
+    nDel.textContent = data.n_omitted || 0;
+    nPauses.textContent = data.pause_count || 0;
+
+    loadRecent();
+  }
+
+  async function loadRecent() {
+    try {
+      const r = await LS.api('/api/logs?limit=8');
+      const logs = r.logs || [];
+      if (!logs.length) { recentList.innerHTML = '<div class="muted">No recent attempts.</div>'; return; }
+      recentList.innerHTML = `
+        <table>
+          <thead><tr><th>When</th><th>Reference</th><th>Overall</th><th>CEFR</th><th>WPM</th></tr></thead>
+          <tbody>
+            ${logs.slice().reverse().map(l => `
+              <tr>
+                <td class="muted">${new Date(l.ts * 1000).toLocaleTimeString()}</td>
+                <td style="max-width:300px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">${(l.reference||'').slice(0,60)}…</td>
+                <td class="${LS.scoreColor(l.overall||0)}" style="font-family:var(--mono); font-weight:600;">${(l.overall||0).toFixed(0)}</td>
+                <td>${l.cefr || '—'}</td>
+                <td style="font-family:var(--mono);">${(l.pace && l.pace.wpm) || 0}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      `;
+    } catch (e) { recentList.innerHTML = '<div class="muted">Failed to load recent attempts.</div>'; }
+  }
+  loadRecent();
+
+  btn.onclick = () => recording ? stop() : start();
+  window.addEventListener('beforeunload', () => {
+    if (session) try { session.close(); } catch {}
+    if (recorder) try { recorder.stop(); } catch {}
+  });
+})();
+</script>
+</body>
+</html>

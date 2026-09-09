@@ -1,0 +1,12 @@
+{
+  "name": "العربية",
+  "whisper_lang_code": "ar",
+  "fluency_ideal_wpm_min": 90,
+  "fluency_ideal_wpm_max": 170,
+  "coach_tips": {
+    "low_accuracy": "انطق كل كلمة بوضوح وحاول الحفاظ على التشكيل.",
+    "low_fluency_slow": "حاول رفع سرعة الكلام قليلاً.",
+    "low_fluency_fast": "خذ نفسًا بين الجمل وقلل من سرعة الكلام.",
+    "high_score": "أحسنت! جرّب نصًا أطول في المرة القادمة."
+  }
+}

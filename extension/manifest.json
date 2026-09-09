@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "LanguageShadow Helper",
+  "version": "1.0.0",
+  "description": "Capture YouTube captions and send them to your local LanguageShadow server for pronunciation shadowing practice.",
+  "permissions": ["activeTab", "storage", "scripting"],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "LanguageShadow Helper"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*", "https://m.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "48": "icon.svg",
+    "128": "icon.svg"
+  }
+}
