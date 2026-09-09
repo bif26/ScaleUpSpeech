@@ -121,12 +121,25 @@ class ModelHolder:
                          config.MODEL_NAME, config.MODEL_COMPUTE_TYPE, config.MODEL_DEVICE)
                 t0 = time.perf_counter()
                 from faster_whisper import WhisperModel
-                self._model = WhisperModel(
-                    config.MODEL_NAME,
+                # cpu_threads MUST be an int: ctranslate2 rejects None
+                # ("TypeError: incompatible constructor arguments").
+                # config.MODEL_CPU_THREADS is always an int (0 = auto).
+                model_kwargs = dict(
                     device=config.MODEL_DEVICE,
                     compute_type=config.MODEL_COMPUTE_TYPE,
-                    cpu_threads=config.MODEL_CPU_THREADS or None,
+                    cpu_threads=config.MODEL_CPU_THREADS,
                 )
+                try:
+                    # Fast path: model already in the local HF cache.
+                    # Pure disk, no network, instant start, works offline.
+                    self._model = WhisperModel(
+                        config.MODEL_NAME, local_files_only=True, **model_kwargs)
+                except Exception:
+                    # Model truly missing: download it once (visible progress
+                    # bars from huggingface_hub). Every later run takes the
+                    # fast path above and never downloads again.
+                    log.info("Model not in local cache — downloading once...")
+                    self._model = WhisperModel(config.MODEL_NAME, **model_kwargs)
                 self._load_time = time.perf_counter() - t0
                 log.info("Whisper model loaded in %.2fs (PID %d, RSS %d MB)",
                          self._load_time, psutil.Process().pid,

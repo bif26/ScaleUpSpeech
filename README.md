@@ -81,7 +81,11 @@ immediately. Nothing is re-downloaded on subsequent runs:
 
 - Python deps live in `.venv/` and are only touched when `requirements.txt`
   imports fail (first run, or after they change).
-- The Whisper model is cached once in `~/.cache/huggingface/` and reused.
+- The Whisper model is downloaded **exactly once**, with a visible progress
+  bar (`python download_model.py` does the same thing manually), into
+  `~/.cache/huggingface/` — **outside the repo**. `git pull`, `rm -rf .venv`,
+  even a fresh re-clone never re-download it. The worker also loads the
+  model straight from disk (offline-fast, no hub checks) once cached.
 - The Svelte UI is rebuilt only when UI sources changed since the last build.
 
 To stop everything:
@@ -271,6 +275,7 @@ languageshadow/
 ├── config.py              # all tunables (env-var overridable)
 ├── requirements.txt
 ├── setup.sh               # install venv + build UI
+├── download_model.py      # one-time Whisper model download w/ visible progress
 ├── start_manager.sh       # launch manager in background
 ├── stop_backend.sh        # kill manager + worker
 ├── API.md                 # extension API contract (input/output examples)
@@ -326,6 +331,16 @@ languageshadow/
 **Worker won't start** — check `logs/languageshadow.log`. Most common cause
 is missing model download (run `./setup.sh` again) or another process
 holding port 8000 (`ss -ltnp | grep 8000`).
+
+**Model download shows no progress / I want to check the cache** — run
+`python download_model.py` manually: it prints file sizes, shows progress
+bars, and skips instantly (0 MB) when the model is already cached. The
+cache lives in `~/.cache/huggingface/hub/models--Systran--faster-whisper-*`.
+To force a re-download of the current model, delete that folder.
+
+**`TypeError: incompatible constructor arguments` from ctranslate2** — fixed
+in this version (it was `cpu_threads=None` being passed when `LS_THREADS=0`).
+`git pull` to get the fix; no other action needed.
 
 **pip fails to build a wheel on a brand-new Python** — you likely have an old
 checkout with pinned versions. `git pull` and delete the stale venv so it is

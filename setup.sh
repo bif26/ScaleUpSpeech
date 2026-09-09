@@ -66,7 +66,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# [4/5] Whisper model — downloaded once, then served from the HF cache.
+# [4/5] Whisper model — downloaded ONCE into the HF cache, then reused forever.
 # ---------------------------------------------------------------------------
 echo "[4/5] Whisper model check..."
 MODEL_NAME_DEFAULT="small"
@@ -75,19 +75,19 @@ MODEL_FOR_CACHE="${LS_MODEL:-$MODEL_NAME_DEFAULT}"
 HF_HUB_DIR="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 MODEL_CACHE=$(ls -d "$HF_HUB_DIR"/models--*faster-whisper-"$MODEL_FOR_CACHE"* 2>/dev/null | head -1 || true)
 
-if [ -n "$MODEL_CACHE" ]; then
-  echo "  Model '$MODEL_FOR_CACHE' already cached — skipping download."
+# "Cached" only counts when the big model.bin blob is actually there: hub
+# symlinks snapshots/<sha>/model.bin into blobs/ only AFTER the download
+# finished, so an interrupted download leaves no symlink and we correctly
+# resume instead of pretending everything is fine.
+if [ -n "$MODEL_CACHE" ] && ls "$MODEL_CACHE"/snapshots/*/model.bin >/dev/null 2>&1; then
+  echo "  Model '$MODEL_FOR_CACHE' already cached — skipping download (0 MB)."
+  echo "    $MODEL_CACHE"
 else
-  echo "  Pre-warming whisper model '$MODEL_FOR_CACHE' (one-time download)..."
-  python - <<'PYEOF'
-import config
-print("  Pre-loading model:", config.MODEL_NAME)
-from faster_whisper import WhisperModel
-m = WhisperModel(config.MODEL_NAME, device=config.MODEL_DEVICE,
-                 compute_type=config.MODEL_COMPUTE_TYPE,
-                 cpu_threads=config.MODEL_CPU_THREADS or None)
-print("  Model ready.")
-PYEOF
+  # One-time download with VISIBLE progress bars + size info, then a
+  # no-network load to verify the install. Never re-downloads: the cache
+  # lives in ~/.cache/huggingface, outside the repo (survives git pull,
+  # rm -rf .venv, even a fresh re-clone).
+  python download_model.py
 fi
 
 # Quick sanity check: phonetics + ffmpeg really usable.
