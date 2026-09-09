@@ -60,13 +60,29 @@ Built for **Arch Linux + Hyprland** on an 8 GB machine that already uses
 
 ## Quick start
 
+### First time only — full setup
+
 ```bash
 cd languageshadow
 ./setup.sh              # creates .venv, installs deps, pre-downloads model,
                         # builds the Svelte UI (npm install + npm run build)
-./start_manager.sh      # starts the manager in the background
+```
+
+### Every other time — just start it
+
+```bash
+./start_manager.sh      # instant: reuses the existing .venv, no downloads
 # open http://127.0.0.1:8765/ in your browser
 ```
+
+`start_manager.sh` is self-healing: if (and only if) the venv or some
+dependency is missing, it calls `./setup.sh` for you — otherwise it starts
+immediately. Nothing is re-downloaded on subsequent runs:
+
+- Python deps live in `.venv/` and are only touched when `requirements.txt`
+  imports fail (first run, or after they change).
+- The Whisper model is cached once in `~/.cache/huggingface/` and reused.
+- The Svelte UI is rebuilt only when UI sources changed since the last build.
 
 To stop everything:
 
@@ -76,9 +92,14 @@ To stop everything:
 
 ### Prerequisites
 
-- **Python 3.10+** — `sudo pacman -S python` (Arch)
+- **Python 3.10+** — `sudo pacman -S python` (Arch). Python 3.14 works.
 - **ffmpeg** — `sudo pacman -S ffmpeg` (needed for webm/opus decoding)
 - **Node.js 18+ + npm** — `sudo pacman -S nodejs npm` (only for the UI build)
+
+> **Python 3.14 (Arch) note:** `requirements.txt` uses version floors instead
+> of hard pins, so pip automatically picks releases with prebuilt cp314
+> wheels. `uvloop` is optional (the worker falls back to the stdlib asyncio
+> loop) and is skipped on Pythons it does not support yet.
 
 ### Auto-start on boot (systemd)
 
@@ -305,6 +326,10 @@ languageshadow/
 **Worker won't start** — check `logs/languageshadow.log`. Most common cause
 is missing model download (run `./setup.sh` again) or another process
 holding port 8000 (`ss -ltnp | grep 8000`).
+
+**pip fails to build a wheel on a brand-new Python** — you likely have an old
+checkout with pinned versions. `git pull` and delete the stale venv so it is
+recreated with the relaxed pins: `rm -rf .venv && ./setup.sh`.
 
 **UI shows "not built" message** — run `./setup.sh` (or just `cd ui && npm install && npm run build`).
 
