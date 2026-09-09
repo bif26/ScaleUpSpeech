@@ -52,3 +52,27 @@ export interface HealthResponse {
 }
 
 export type WorkerState = HealthResponse['worker']['state'];
+
+/* Live Caption: streaming partial transcript frame (free-speech mode) */
+export interface PartialFrame {
+  type: 'partial';
+  session_id: string;
+  text: string;
+  words: number;
+  elapsed_s: number;
+}
+
+/* Logs page: one parsed line from the shared manager+worker log file */
+export interface SystemLogLine {
+  ts: number;
+  ts_str: string;
+  source: 'manager' | 'worker' | 'system';
+  level: string;
+  msg: string;
+}
+
+export interface SystemLogResponse {
+  file: string;
+  size_bytes: number;
+  lines: SystemLogLine[];
+}

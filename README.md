@@ -120,18 +120,21 @@ systemctl --user enable --now languageshadow-manager
 
 ---
 
-## The three pages
+## The four pages
 
 ### 1. `/live` — Live Caption
-Type a short reference text, click **Start speaking**, and each word turns
-green / red the instant you say it. Just like Monkeytype / 10fastfingers,
-but for speaking. Useful for short bursts of pronunciation practice.
+Free speech mode: click **Start captioning** and just talk — Whisper
+transcribes every word in real time, no reference text, no scoring.
+The AI worker auto-starts with the page, so the model loads while you
+grant mic permission.
 
-Three sliders tune scoring strictness in real time:
-- **Mic sensitivity** — amplifies quiet speech for the VU meter (does not affect scoring).
-- **Target WPM (min)** — fluency is 100 above this rate, scaled down below it.
-- **Pause threshold (s)** — gaps between words longer than this count as hesitation
-  pauses and subtract from fluency. Smaller = stricter.
+What you get:
+- live transcript — finished text in white, the in-progress phrase pulsing in lavender
+- running word count, timer and live WPM
+- **Copy**, **Save .txt** and **Clear** buttons for the transcript
+- language selector (EN / ES / DE / FR / AR / auto-detect)
+- the worker keeps only a rolling audio tail, so latency and RAM stay flat
+  even in hours-long caption sessions
 
 ### 2. `/read` — Read Text
 Paste a passage from a book (the default is the opening of *A Tale of Two
@@ -155,6 +158,22 @@ renders it directly.
 The YouTube page also shows the complete API contract inline, plus a live
 caption inbox (if your extension posts captions to `/api/caption`, you
 can load them as practice reference).
+
+### 4. `/logs` — Logs
+Everything the stack prints, in one place:
+
+- **System log** — the runtime log of manager + worker, parsed from
+  `logs/languageshadow.log` with level colours (red = error, yellow =
+  warning). Filter by source, auto-refresh every 2.5 s (pausable), copy
+  or download the visible tail. Read straight from disk, so it works even
+  while the worker is stopped.
+- **Worker console** — the raw stdout/stderr of the worker captured to
+  `logs/worker.out`. This is where startup crashes land (import errors,
+  missing model files, …) — previously that output went to /dev/null and
+  a dead worker looked like a mystery.
+- **Practice history** — every scored attempt (from the worker's
+  in-memory store; resets when the worker is idle-killed or the machine
+  reboots).
 
 ---
 

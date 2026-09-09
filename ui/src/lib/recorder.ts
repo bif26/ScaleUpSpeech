@@ -91,7 +91,7 @@ export class Recorder {
 /* WebSocket transcribe session — opens the WS, sends the config frame, then
    forwards PCM chunks until the client sends 'END'. The server returns
    incremental and final scoring frames. */
-import type { AssessResponse } from './types';
+import type { AssessResponse, PartialFrame } from './types';
 
 export interface IncrementalFrame {
   type: 'incremental';
@@ -104,7 +104,7 @@ export interface IncrementalFrame {
   verdicts: Array<{ word: string; accuracy: number; errorType: string }>;
 }
 
-export type ServerFrame = IncrementalFrame | (AssessResponse & { type: 'final' });
+export type ServerFrame = IncrementalFrame | PartialFrame | (AssessResponse & { type: 'final' });
 
 export class TranscribeSession {
   private ws: WebSocket | null = null;

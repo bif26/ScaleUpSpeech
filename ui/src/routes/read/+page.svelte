@@ -199,12 +199,12 @@
                 placeholder="Paste a passage from a book, news article, or any text…" />
       <div class="flex flex-wrap items-end gap-4">
         <div class="space-y-1.5">
-          <label class="text-xs text-muted-foreground">Language</label>
-          <Select bind:value={language} options={langOptions} class="w-44" />
+          <label for="read-language" class="text-xs text-muted-foreground">Language</label>
+          <Select id="read-language" bind:value={language} options={langOptions} class="w-44" />
         </div>
         <div class="space-y-1.5">
-          <label class="text-xs text-muted-foreground">Live scoring</label>
-          <Select bind:value={liveMode} options={liveOptions} class="w-56" />
+          <label for="read-live-mode" class="text-xs text-muted-foreground">Live scoring</label>
+          <Select id="read-live-mode" bind:value={liveMode} options={liveOptions} class="w-56" />
         </div>
         <div class="flex-1"></div>
         <Button variant={recording ? 'destructive' : 'default'} onclick={toggle}>
@@ -221,17 +221,17 @@
     <CardContent class="space-y-5">
       <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <label class="text-sm">Target WPM (min)</label>
+          <label for="read-wpm" class="text-sm">Target WPM (min)</label>
           <span class="font-mono text-xs text-muted-foreground">{targetWpm}</span>
         </div>
-        <Slider bind:value={targetWpm} min={40} max={180} step={5} />
+        <Slider id="read-wpm" bind:value={targetWpm} min={40} max={180} step={5} />
       </div>
       <div class="space-y-2">
         <div class="flex items-center justify-between">
-          <label class="text-sm">Pause threshold (s)</label>
+          <label for="read-pause" class="text-sm">Pause threshold (s)</label>
           <span class="font-mono text-xs text-muted-foreground">{pauseThr.toFixed(1)}s</span>
         </div>
-        <Slider bind:value={pauseThr} min={0.4} max={2.5} step={0.1} />
+        <Slider id="read-pause" bind:value={pauseThr} min={0.4} max={2.5} step={0.1} />
       </div>
     </CardContent>
   </Card>
@@ -254,20 +254,20 @@
     <CardContent>
       <div class="flex flex-wrap gap-1.5 min-h-20 rounded-md border border-border bg-base p-4">
         {#if result?.words?.length}
-          {#each result.words as w (w.word + Math.random())}
+          {#each result.words as w, i (i)}
             <span class="rounded-md border px-2.5 py-1 font-mono text-sm {chipClass(w)}"
                   title="{w.errorType} · accuracy {w.accuracy}">{w.word}</span>
           {/each}
         {:else if liveVerdicts.length}
-          {#each liveVerdicts as v (v.word + Math.random())}
+          {#each liveVerdicts as v, i (i)}
             <span class="rounded-md border px-2.5 py-1 font-mono text-sm {chipClass(v)}"
                   title="{v.errorType} · accuracy {v.accuracy}">{v.word}</span>
           {/each}
-          {#each refWords.slice(liveSpoken) as w (w + Math.random())}
+          {#each refWords.slice(liveSpoken) as w, i (i)}
             <span class="rounded-md border border-border bg-muted/30 text-muted-foreground/60 px-2.5 py-1 font-mono text-sm">{w}</span>
           {/each}
         {:else}
-          {#each refWords as w (w)}
+          {#each refWords as w, i (i)}
             <span class="rounded-md border border-border bg-muted/30 text-muted-foreground/60 px-2.5 py-1 font-mono text-sm">{w}</span>
           {/each}
         {/if}
@@ -355,7 +355,7 @@
               </tr>
             </thead>
             <tbody>
-              {#each recentLogs as l (l.ts)}
+              {#each recentLogs as l, i (i)}
                 <tr class="border-b border-border/50">
                   <td class="py-2 pr-4 text-muted-foreground">{new Date(l.ts * 1000).toLocaleTimeString()}</td>
                   <td class="py-2 pr-4 max-w-xs truncate">{(l.reference || '').slice(0, 60)}…</td>

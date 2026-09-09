@@ -229,9 +229,35 @@ requests are fast.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/health` | Worker health + RAM + model status |
-| GET | `/api/logs?limit=N` | Recent takes (newest last) |
+| GET | `/api/logs?limit=N` | Recent takes (newest last). Served by the worker; the manager proxies it and returns `{"logs": []}` while the worker is stopped. |
+| GET | `/api/logs/system?tail=N&source=all\|manager\|worker` | **Manager.** Runtime log lines parsed from `logs/languageshadow.log` (both processes write there). Works even when the worker is stopped. Returns `{file, size_bytes, lines:[{ts, ts_str, source, level, msg}]}` — multi-line records (tracebacks) are folded into one entry. |
+| GET | `/api/logs/output?tail_lines=N` | **Manager.** Raw stdout/stderr of the worker captured to `logs/worker.out` — startup crashes land here even if the structured logger never ran. |
 | GET | `/api/stats` | Aggregate stats (avg_overall, total_assessments, etc.) |
 | POST | `/heartbeat` | Reserved for the manager's heartbeat |
+
+### Streaming partial transcripts (free-speech mode)
+
+Open `/ws/transcribe` with an **empty** `reference_text` (this is what the
+Live Caption page does) and the worker streams `partial` frames with the
+running transcript while you speak:
+
+```json
+{
+  "type": "partial",
+  "session_id": "…",
+  "text": "hello world today testing more words",
+  "words": 6,
+  "elapsed_s": 12.4
+}
+```
+
+The worker keeps only a rolling ~20 s audio tail and moves finished
+sentences into its settled transcript, so latency and RAM stay flat even in
+hours-long caption sessions. The `final` frame (after `END`) contains the
+complete `recognized` text plus `words` and `duration_s`.
+
+With a non-empty `reference_text` the behaviour is unchanged: `incremental`
+scoring frames while you speak, scored `final` at the end.
 
 ### Logs example
 

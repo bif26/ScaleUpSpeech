@@ -71,6 +71,10 @@ logging.basicConfig(
 )
 log = logging.getLogger("worker")
 
+# Same as manager: httpx heartbeat logs would flood the shared log file.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 # ---------------------------------------------------------------------------
 # ffmpeg audio decoder (webm/opus / ogg/opus / wav -> 16k mono PCM float32)
@@ -399,6 +403,13 @@ async def heartbeat() -> dict:
 # WebSocket endpoint for live streaming (used by the web UI, not the extension)
 # ---------------------------------------------------------------------------
 class StreamingSession:
+    # Rolling-window tuning for free-speech (Live Caption) mode. We keep only
+    # the audio tail in the buffer and move finished sentences into
+    # settled_text, so transcription latency stays constant even after hours
+    # of captioning (and RAM stays flat - important for the 2.3 GB budget).
+    SETTLE_MARGIN_S = 1.2   # a segment ends >= this far from buffer end -> settled
+    TAIL_KEEP_S = 20.0      # never transcribe more than the last N seconds
+
     def __init__(self, ws: WebSocket, *, reference_text: str = "",
                  live_scoring: bool = True, target_language: str = "en") -> None:
         self.ws = ws
@@ -407,6 +418,8 @@ class StreamingSession:
         self.target_language = target_language
         self.buffer: np.ndarray = np.zeros(0, dtype=np.float32)
         self.committed_segments: List[dict] = []
+        self.settled_text: str = ""      # free-speech mode: finished transcript
+        self._last_partial: str = ""     # dedupe identical partial frames
         self.start_time = time.time()
         self.session_id = str(uuid.uuid4())
 
@@ -422,11 +435,58 @@ class StreamingSession:
             log.debug("transcribe failed during streaming: %s", e)
             return
 
+        if not self.reference_text:
+            # Live Caption mode: emit the running transcript and roll the
+            # buffer forward so we only ever transcribe the recent tail.
+            await self._emit_partial(segments)
+            self._settle(segments)
+            return
+
         new_count = sum(len(s.get("words") or []) for s in segments)
         old_count = sum(len(s.get("words") or []) for s in self.committed_segments)
         self.committed_segments = segments
         if new_count > old_count and self.live_scoring:
             await self._emit_incremental()
+
+    async def _emit_partial(self, segments: List[dict]) -> None:
+        text = " ".join(s.get("text", "").strip() for s in segments).strip()
+        full = (self.settled_text + " " + text).strip()
+        if not full or full == self._last_partial:
+            return
+        self._last_partial = full
+        payload = {
+            "type": "partial",
+            "session_id": self.session_id,
+            "text": full,
+            "words": len(full.split()),
+            "elapsed_s": round(time.time() - self.start_time, 2),
+        }
+        try:
+            await self.ws.send_text(json.dumps(payload))
+        except Exception:
+            log.debug("ws send failed during partial")
+
+    def _settle(self, segments: List[dict]) -> None:
+        """Move finished segments out of the rolling buffer into settled_text.
+
+        A segment is 'settled' when it ends comfortably before the end of the
+        buffered audio (i.e. whisper is unlikely to revise it further).
+        """
+        buf_s = len(self.buffer) / config.SAMPLE_RATE
+        settled_until = None  # audio seconds up to which everything is settled
+        for s in segments:
+            if s.get("end", 0.0) <= buf_s - self.SETTLE_MARGIN_S:
+                piece = s.get("text", "").strip()
+                if piece:
+                    self.settled_text = (self.settled_text + " " + piece).strip()
+                    settled_until = s["end"]
+        if settled_until is not None:
+            keep_from = max(0.0, settled_until - 0.25)
+            self.buffer = self.buffer[int(keep_from * config.SAMPLE_RATE):]
+        elif buf_s > self.TAIL_KEEP_S:
+            # Safety valve: extremely long utterance with no segment boundary -
+            # still cap the buffer so latency cannot grow without bound.
+            self.buffer = self.buffer[-int(self.TAIL_KEEP_S * config.SAMPLE_RATE):]
 
     async def _emit_incremental(self) -> None:
         if not self.reference_text:
@@ -457,9 +517,15 @@ class StreamingSession:
                     **payload,
                 })
         else:
+            # Free-speech / Live Caption session: recognized text is the
+            # settled transcript plus whatever is still in the rolling tail.
+            tail = " ".join(s.get("text", "").strip() for s in segments).strip()
+            recognized = (self.settled_text + " " + tail).strip()
             payload = {
                 "status": "OK",
-                "recognized": " ".join(s["text"].strip() for s in segments),
+                "recognized": recognized,
+                "words": len(recognized.split()),
+                "duration_s": round(time.time() - self.start_time, 2),
                 "segments": segments,
             }
         payload["type"] = "final"

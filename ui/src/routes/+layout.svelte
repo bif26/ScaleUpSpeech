@@ -12,6 +12,7 @@
   import BookIcon from 'lucide-svelte/icons/book-open';
   import YoutubeIcon from 'lucide-svelte/icons/youtube';
   import ActivityIcon from 'lucide-svelte/icons/activity';
+  import LogsIcon from 'lucide-svelte/icons/scroll-text';
 
   let { children } = $props();
 
@@ -19,7 +20,8 @@
     { href: '/',         label: 'Home',         icon: HomeIcon },
     { href: '/live',     label: 'Live Caption', icon: MicIcon },
     { href: '/read',     label: 'Read Text',    icon: BookIcon },
-    { href: '/youtube', label: 'YouTube',        icon: YoutubeIcon },
+    { href: '/youtube',  label: 'YouTube',      icon: YoutubeIcon },
+    { href: '/logs',     label: 'Logs',         icon: LogsIcon },
   ];
 
   $effect(() => {

@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -53,6 +54,11 @@ logging.basicConfig(
 )
 log = logging.getLogger("manager")
 
+# httpx logs every internal request (health polls, heartbeats) at INFO —
+# that would flood the shared log file and the Logs page. Keep warnings+.
+for _noisy in ("httpx", "httpcore"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 # ---------------------------------------------------------------------------
 # Worker supervisor
@@ -79,6 +85,7 @@ class WorkerSupervisor:
         self.worker_rss_mb: int = 0
         self.model_loaded: bool = False
         self.start_count: int = 0
+        self._worker_out = None
         self._lock = asyncio.Lock()
 
     async def start(self) -> dict:
@@ -92,12 +99,18 @@ class WorkerSupervisor:
             env["PYTHONUNBUFFERED"] = "1"
             # Run worker.py as a subprocess of the same Python interpreter.
             cmd = [sys.executable, str(config.BASE_DIR / "worker.py")]
+            # Capture the worker's console output in logs/worker.out so startup
+            # crashes (import errors, missing model files, ...) are never lost.
+            # The worker also logs structured lines to config.LOG_FILE itself;
+            # this file catches everything BEFORE/AFTER the logger is set up.
+            config.LOG_DIR.mkdir(exist_ok=True)
+            self._worker_out = open(config.LOG_DIR / "worker.out", "ab")
             self.process = subprocess.Popen(
                 cmd,
                 cwd=str(config.BASE_DIR),
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=self._worker_out,
+                stderr=subprocess.STDOUT,
                 # Put the worker in its own process group so we can kill the
                 # whole tree cleanly.
                 start_new_session=True,
@@ -160,6 +173,12 @@ class WorkerSupervisor:
             self.worker_pid = None
             self.worker_rss_mb = 0
             self.model_loaded = False
+            if self._worker_out:
+                try:
+                    self._worker_out.close()
+                except Exception:
+                    pass
+                self._worker_out = None
             return {"status": "STOPPED"}
 
     async def freeze(self) -> dict:
@@ -511,6 +530,99 @@ async def m_logs_proxy(limit: int = 10) -> JSONResponse:
     async with httpx.AsyncClient(timeout=5.0) as c:
         r = await c.get(f"http://{config.WORKER_HOST}:{config.WORKER_PORT}/api/logs?limit={limit}")
     return JSONResponse(r.json())
+
+
+# ---------------------------------------------------------------------------
+# System log viewer API — reads logs/languageshadow.log from disk.
+# ---------------------------------------------------------------------------
+# Unlike /api/logs (practice history, lives in the WORKER's memory and
+# disappears when the worker is idle-killed), this endpoint works ALWAYS -
+# the manager can serve it even when the worker is stopped. Both processes
+# log structured lines to the same file with " [manager] " / " [worker] "
+# tags, which we parse back into structured entries for the Logs page.
+_LOG_LINE_RE = re.compile(
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d+)\s+\[(manager|worker)\]\s+(\w+)\s*[: ]?\s?(.*)$"
+)
+
+# How much of the log file we read from the end when asked for a tail.
+_LOG_TAIL_BYTES = 512 * 1024
+
+
+def _read_log_entries(tail_bytes: int = _LOG_TAIL_BYTES) -> list:
+    """Parse the shared log file into [{ts, source, level, msg}] entries.
+
+    Multi-line records (tracebacks etc.) are folded into the previous
+    entry's message. Unparseable leading lines become source='system'.
+    """
+    f = config.LOG_FILE
+    if not f.exists():
+        return []
+    size = f.stat().st_size
+    with open(f, "rb") as fh:
+        if size > tail_bytes:
+            fh.seek(-tail_bytes, os.SEEK_END)
+        fh.readline()  # drop the (probably partial) first line
+        text = fh.read().decode("utf-8", errors="replace")
+
+    entries: list = []
+    for raw in text.splitlines():
+        if not raw.strip():
+            continue
+        m = _LOG_LINE_RE.match(raw)
+        if m:
+            ts_str, source, level, msg = m.groups()
+            try:
+                ts = time.mktime(time.strptime(ts_str, "%Y-%m-%d %H:%M:%S,%f"))
+            except ValueError:
+                ts = 0.0
+            entries.append({"ts": ts, "ts_str": ts_str, "source": source,
+                            "level": level.lower(), "msg": msg})
+        elif entries:
+            # Continuation of the previous entry (traceback, etc.)
+            entries[-1]["msg"] += "\n" + raw
+        else:
+            entries.append({"ts": 0.0, "ts_str": "", "source": "system",
+                            "level": "info", "msg": raw})
+    return entries
+
+
+@app.get("/api/logs/system")
+async def m_logs_system(tail: int = 300, source: str = "all") -> dict:
+    """Runtime log lines from manager + worker (from the shared log file).
+
+    Query params:
+      tail   - max number of entries to return (default 300)
+      source - all | manager | worker | system
+    """
+    tail = max(10, min(int(tail), 2000))
+    entries = _read_log_entries()
+    if source and source != "all":
+        entries = [e for e in entries if e["source"] == source]
+    return {
+        "file": str(config.LOG_FILE),
+        "size_bytes": config.LOG_FILE.stat().st_size if config.LOG_FILE.exists() else 0,
+        "lines": entries[-tail:],
+    }
+
+
+@app.get("/api/logs/output")
+async def m_logs_output(tail_lines: int = 200) -> dict:
+    """Raw captured console output of the worker (logs/worker.out).
+
+    This is where crashes that happen before the logger is configured land
+    (import errors, missing shared libraries, download failures, ...).
+    """
+    tail_lines = max(10, min(int(tail_lines), 2000))
+    f = config.LOG_DIR / "worker.out"
+    if not f.exists():
+        return {"file": str(f), "lines": []}
+    size = f.stat().st_size
+    with open(f, "rb") as fh:
+        if size > _LOG_TAIL_BYTES:
+            fh.seek(-_LOG_TAIL_BYTES, os.SEEK_END)
+        data = fh.read().decode("utf-8", errors="replace")
+    lines = data.splitlines()[-tail_lines:]
+    return {"file": str(f), "lines": lines}
 
 
 @app.get("/api/stats")

@@ -118,8 +118,24 @@ needs_build() {
 cd ui
 if [ ! -d node_modules ]; then
   echo "  Installing npm dependencies (one-time)..."
-  npm install
+  npm install --no-audit --no-fund
 fi
+
+# Some newer npm versions ship with an "install-scripts" allowlist that BLOCKS
+# esbuild's postinstall ("npm warn install-scripts ... esbuild@x (postinstall:
+# node install.js)"). When that happens, `vite build` later dies with
+# "esbuild: Failed to install correctly". Detect and self-heal by running the
+# installer directly — works no matter what the npm policy is.
+if ! node -e "require('esbuild')" >/dev/null 2>&1; then
+  echo "  esbuild binary missing (npm blocked its install script) — fixing..."
+  node node_modules/esbuild/install.js >/dev/null 2>&1 \
+    || npm rebuild esbuild --foreground-scripts \
+    || npm install esbuild --force --no-audit --no-fund
+  node -e "require('esbuild')" >/dev/null 2>&1 \
+    && echo "  esbuild OK" \
+    || { echo "ERROR: esbuild still broken. Run manually:  cd ui && node node_modules/esbuild/install.js"; exit 1; }
+fi
+
 if needs_build; then
   echo "  Building UI..."
   npm run build

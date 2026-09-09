@@ -1,6 +1,6 @@
 /* LanguageShadow REST API client */
 
-import type { AssessResponse, HealthResponse } from './types';
+import type { AssessResponse, HealthResponse, SystemLogResponse } from './types';
 
 const API_BASE = `http://${location.hostname}:8765`;
 const WS_URL = `ws://${location.hostname}:8765/ws/transcribe`;
@@ -45,6 +45,15 @@ export const apiClient = {
 
   logs(limit = 10): Promise<{ logs: any[] }> {
     return api(`/api/logs?limit=${limit}`);
+  },
+
+  /* Manager-side log endpoints — work even when the worker is stopped. */
+  systemLogs(tail = 300, source = 'all'): Promise<SystemLogResponse> {
+    return api(`/api/logs/system?tail=${tail}&source=${encodeURIComponent(source)}`);
+  },
+
+  workerOutput(tailLines = 200): Promise<{ file: string; lines: string[] }> {
+    return api(`/api/logs/output?tail_lines=${tailLines}`);
   },
 
   stats(): Promise<any> {
