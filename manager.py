@@ -335,32 +335,10 @@ async def index() -> HTMLResponse:
     return HTMLResponse(f.read_text(encoding="utf-8"))
 
 
-@app.get("/{path:path}")
-async def spa_fallback(path: str, request: Request) -> HTMLResponse:
-    """Catch-all that returns index.html for client-side SvelteKit routes
-    (/live, /read, /youtube, etc.). Real static assets under /_app/ are
-    handled by the StaticFiles mount above. API routes are declared before
-    this handler so they take precedence.
-    """
-    # Don't shadow the API endpoints (they're declared before this catch-all).
-    if path.startswith(("api/", "manager/", "ws", "static/", "_app/")):
-        return HTMLResponse("not found", 404)
-
-    # If a real file exists at this path under the build dir (e.g. favicon.svg),
-    # let it serve.
-    candidate = config.STATIC_DIR / path
-    if candidate.is_file():
-        return FileResponse(str(candidate))
-
-    # Otherwise return the SPA shell for client-side routing.
-    f = config.STATIC_DIR / "index.html"
-    if f.exists():
-        return HTMLResponse(f.read_text(encoding="utf-8"))
-    return HTMLResponse("not found", 404)
-
-
-# (legacy per-route HTML handlers removed — SvelteKit SPA handles client-side
-# routing from index.html)
+# NOTE: the SPA catch-all route is registered at the BOTTOM of this file,
+# AFTER every API route. Starlette matches routes in registration order, so
+# a catch-all defined earlier would shadow /manager/*, /api/* GET endpoints
+# and return 404 for all of them.
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +598,33 @@ async def ws_proxy(ws_in: WebSocket) -> None:
             await ws_in.close(code=1011, reason=str(e))
         except Exception:
             pass
+
+
+# ---------------------------------------------------------------------------
+# SPA catch-all — MUST stay after every API route (registration order =
+# match priority in Starlette). Returns index.html for client-side SvelteKit
+# routes (/live, /read, /youtube, etc.). Real static assets under /_app/ are
+# handled by the StaticFiles mount above.
+# ---------------------------------------------------------------------------
+@app.get("/{path:path}")
+async def spa_fallback(path: str, request: Request) -> HTMLResponse:
+    # Don't shadow the API endpoints (they are all registered above and take
+    # priority; reaching here with an api/manager path means it truly does
+    # not exist).
+    if path.startswith(("api/", "manager/", "ws", "static/", "_app/")):
+        return HTMLResponse("not found", 404)
+
+    # If a real file exists at this path under the build dir (e.g. favicon.svg),
+    # let it serve.
+    candidate = config.STATIC_DIR / path
+    if candidate.is_file():
+        return FileResponse(str(candidate))
+
+    # Otherwise return the SPA shell for client-side routing.
+    f = config.STATIC_DIR / "index.html"
+    if f.exists():
+        return HTMLResponse(f.read_text(encoding="utf-8"))
+    return HTMLResponse("not found", 404)
 
 
 # ---------------------------------------------------------------------------
