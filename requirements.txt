@@ -1,11 +1,24 @@
-fastapi==0.110.0
-uvicorn==0.29.0
-websockets==12.0
-httpx==0.27.0
-pydantic==2.6.4
-faster-whisper==1.2.1
+# LanguageShadow backend requirements.
+#
+# NOTE — floors, not hard pins. pip resolves the newest release that supports
+# YOUR Python interpreter, so freshly released Pythons (e.g. Python 3.14 on
+# Arch Linux) automatically get prebuilt wheels instead of failing to compile
+# old frozen versions from source.
+#
+#   * pydantic>=2.12 ships pydantic-core wheels for Python 3.14
+#     (pydantic==2.6.4 pinned pydantic-core==2.16.3, which cannot build there)
+#   * uvloop is OPTIONAL: worker.py detects it and falls back to the stdlib
+#     asyncio loop when absent, so it is simply skipped on Pythons that
+#     uvloop does not support yet (python_version < "3.14" marker).
+
+fastapi>=0.115.0
+uvicorn>=0.34.0
+websockets>=12.0
+httpx>=0.27.0
+pydantic>=2.12.0
+faster-whisper>=1.2.1
 numpy>=1.26.4
-psutil==5.9.8
-rapidfuzz==3.7.0
-phonetics==1.0.5
-uvloop==0.19.0; platform_system != "Windows"
+psutil>=5.9.8
+rapidfuzz>=3.7.0
+phonetics>=1.0.5
+uvloop>=0.19.0; platform_system != "Windows" and python_version < "3.14"
