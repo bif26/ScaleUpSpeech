@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# LanguageShadow - one-time setup script
+# LanguageShadow - setup script (idempotent: safe to re-run, skips finished work)
 #
 # Steps:
 #   1. Check Python 3.10+ and ffmpeg
-#   2. Create Python venv and install backend deps
-#   3. Pre-download the Whisper model
+#   2. Create Python venv and install backend deps (only if missing)
+#   3. Pre-download the Whisper model (only if not cached)
 #   4. Install Node.js deps for the Svelte UI and build it to ui/build/
+#      (only if missing or stale)
+#
+# Re-running this script after everything is installed finishes in ~1 second.
+# Day-to-day you do NOT need to run it at all — ./start_manager.sh will call
+# it automatically only when something is actually missing.
 
 set -e
 cd "$(dirname "$0")"
@@ -37,44 +42,94 @@ if ! command -v npm >/dev/null 2>&1; then
   exit 1
 fi
 
-echo "[3/5] Creating Python venv and installing backend requirements..."
-if [ ! -d "$VENV" ]; then
+# ---------------------------------------------------------------------------
+# [3/5] Python venv + requirements — installed once, reused forever.
+# ---------------------------------------------------------------------------
+echo "[3/5] Python venv + backend requirements..."
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "  Creating venv..."
   "$PY" -m venv "$VENV"
 fi
-# shellcheck disable=SC1091
-source "$VENV/bin/activate"
-pip install --upgrade pip --quiet
-pip install -r requirements.txt
 
-echo "[4/5] Pre-warming whisper model..."
-python - <<'PYEOF'
+# Shellcheck disable=SC1091
+source "$VENV/bin/activate"
+
+# All runtime imports the backend needs. If this succeeds, nothing to install.
+if "$VENV/bin/python" -c "import fastapi, uvicorn, websockets, httpx, pydantic, \
+faster_whisper, numpy, psutil, rapidfuzz, phonetics" >/dev/null 2>&1; then
+  echo "  Dependencies already installed — skipping pip install."
+else
+  echo "  Installing/upgrading requirements (first run or after requirements.txt changed)..."
+  "$VENV/bin/pip" install --upgrade pip
+  "$VENV/bin/pip" install -r requirements.txt
+fi
+
+# ---------------------------------------------------------------------------
+# [4/5] Whisper model — downloaded once, then served from the HF cache.
+# ---------------------------------------------------------------------------
+echo "[4/5] Whisper model check..."
+MODEL_NAME_DEFAULT="small"
+# config.py honours LS_MODEL; mirror it so the cache path matches.
+MODEL_FOR_CACHE="${LS_MODEL:-$MODEL_NAME_DEFAULT}"
+HF_HUB_DIR="${HF_HOME:-$HOME/.cache/huggingface}/hub"
+MODEL_CACHE=$(ls -d "$HF_HUB_DIR"/models--*faster-whisper-"$MODEL_FOR_CACHE"* 2>/dev/null | head -1 || true)
+
+if [ -n "$MODEL_CACHE" ]; then
+  echo "  Model '$MODEL_FOR_CACHE' already cached — skipping download."
+else
+  echo "  Pre-warming whisper model '$MODEL_FOR_CACHE' (one-time download)..."
+  python - <<'PYEOF'
 import config
-print("Pre-loading model:", config.MODEL_NAME)
+print("  Pre-loading model:", config.MODEL_NAME)
 from faster_whisper import WhisperModel
 m = WhisperModel(config.MODEL_NAME, device=config.MODEL_DEVICE,
                  compute_type=config.MODEL_COMPUTE_TYPE,
                  cpu_threads=config.MODEL_CPU_THREADS or None)
-print("Model ready.")
-# Verify phonetics + ffmpeg are available.
+print("  Model ready.")
+PYEOF
+fi
+
+# Quick sanity check: phonetics + ffmpeg really usable.
+python - <<'PYEOF'
 import phonetics
 assert phonetics.metaphone("hello"), "phonetics test failed"
-print("phonetics OK")
+print("  phonetics OK")
 import shutil
 assert shutil.which("ffmpeg"), "ffmpeg not on PATH"
-print("ffmpeg OK")
+print("  ffmpeg OK")
 PYEOF
 
-echo "[5/5] Building Svelte UI (Catppuccin Mocha + shadcn-svelte)..."
+# ---------------------------------------------------------------------------
+# [5/5] Svelte UI — built only when missing or older than the sources.
+# ---------------------------------------------------------------------------
+echo "[5/5] Svelte UI (Catppuccin Mocha + shadcn-svelte)..."
+
+needs_build() {
+  # Called from inside ui/ (after `cd ui`). No build yet -> build. Otherwise
+  # build only when some source file is newer than the last build output.
+  [ ! -f build/index.html ] && return 0
+  local newer
+  newer=$(find src static package.json svelte.config.js vite.config.ts tsconfig.json \
+                -type f -newer build/index.html 2>/dev/null | head -1)
+  [ -n "$newer" ]
+}
+
 cd ui
 if [ ! -d node_modules ]; then
+  echo "  Installing npm dependencies (one-time)..."
   npm install
 fi
-npm run build
+if needs_build; then
+  echo "  Building UI..."
+  npm run build
+else
+  echo "  UI build is up to date — skipping."
+fi
 cd ..
-echo "  Built to: $(pwd)/ui/build"
 
 echo ""
-echo "Setup complete. Next: ./start_manager.sh"
+echo "Setup complete. Start everything with:  ./start_manager.sh"
 echo "Then open http://127.0.0.1:8765/ in your browser."
 echo ""
 echo "To use your existing YouTube extension, point it at:"
