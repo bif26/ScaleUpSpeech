@@ -31,6 +31,16 @@ test*.ogg
 temp_*.wav
 user_practice_attempt.*
 
+# Node / Svelte UI build artifacts
+ui/node_modules/
+ui/build/
+ui/.svelte-kit/
+ui/package-lock.json
+ui/pnpm-lock.yaml
+ui/yarn.lock
+ui/.svelte-kit
+node_modules/
+
 # Editor
 .vscode/
 .idea/
@@ -45,3 +55,4 @@ Thumbs.db
 # Build / package
 dist/
 build/
+!ui/build/.gitkeep

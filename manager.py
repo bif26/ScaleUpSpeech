@@ -304,36 +304,63 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
-# Static UI
+# Static UI — SvelteKit SPA build
 # ---------------------------------------------------------------------------
-if config.STATIC_DIR.exists():
-    app.mount("/static", StaticFiles(directory=str(config.STATIC_DIR)), name="static")
+# SvelteKit with adapter-static builds to ui/build/. The output is:
+#   index.html           - the entry HTML (with hashed JS/CSS links)
+#   _app/immutable/...  - hashed JS/CSS chunks (immutable, long-cacheable)
+#   favicon.svg
+#   /live, /read, /youtube - per-route prerendered fallbacks (or just /index.html
+#                            in SPA mode if fallback: 'index.html' is set)
+#
+# We mount the whole build dir as static so all assets resolve. Then a catch-all
+# route returns index.html for any path that's not an API endpoint or a real
+# asset — this is what makes client-side routing work.
+if config.STATIC_DIR.exists() and (config.STATIC_DIR / "index.html").exists():
+    app.mount("/_app", StaticFiles(directory=str(config.STATIC_DIR / "_app")), name="app_assets")
+    # Expose any other static files at the root (favicon etc.)
+    app.mount("/favicon.svg", StaticFiles(directory=str(config.STATIC_DIR)), name="favicon")
 
 
 @app.get("/")
 async def index() -> HTMLResponse:
     f = config.STATIC_DIR / "index.html"
     if not f.exists():
-        return HTMLResponse("<h1>LanguageShadow</h1><p>static/index.html missing</p>", 200)
+        return HTMLResponse(
+            "<h1>LanguageShadow</h1>"
+            "<p>UI not built. Run <code>./setup.sh</code> (which builds the Svelte UI) "
+            "or <code>cd ui && npm run build</code> manually.</p>",
+            200,
+        )
     return HTMLResponse(f.read_text(encoding="utf-8"))
 
 
-@app.get("/live")
-async def live_page() -> HTMLResponse:
-    f = config.STATIC_DIR / "live.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("not found", 404)
+@app.get("/{path:path}")
+async def spa_fallback(path: str, request: Request) -> HTMLResponse:
+    """Catch-all that returns index.html for client-side SvelteKit routes
+    (/live, /read, /youtube, etc.). Real static assets under /_app/ are
+    handled by the StaticFiles mount above. API routes are declared before
+    this handler so they take precedence.
+    """
+    # Don't shadow the API endpoints (they're declared before this catch-all).
+    if path.startswith(("api/", "manager/", "ws", "static/", "_app/")):
+        return HTMLResponse("not found", 404)
+
+    # If a real file exists at this path under the build dir (e.g. favicon.svg),
+    # let it serve.
+    candidate = config.STATIC_DIR / path
+    if candidate.is_file():
+        return FileResponse(str(candidate))
+
+    # Otherwise return the SPA shell for client-side routing.
+    f = config.STATIC_DIR / "index.html"
+    if f.exists():
+        return HTMLResponse(f.read_text(encoding="utf-8"))
+    return HTMLResponse("not found", 404)
 
 
-@app.get("/read")
-async def read_page() -> HTMLResponse:
-    f = config.STATIC_DIR / "read.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("not found", 404)
-
-
-@app.get("/youtube")
-async def youtube_page() -> HTMLResponse:
-    f = config.STATIC_DIR / "youtube.html"
-    return HTMLResponse(f.read_text(encoding="utf-8")) if f.exists() else HTMLResponse("not found", 404)
+# (legacy per-route HTML handlers removed — SvelteKit SPA handles client-side
+# routing from index.html)
 
 
 # ---------------------------------------------------------------------------

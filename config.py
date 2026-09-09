@@ -15,7 +15,11 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 BASE_DIR = Path(__file__).resolve().parent
 LANG_DIR = BASE_DIR / "languages"
-STATIC_DIR = BASE_DIR / "static"
+# The Svelte UI builds to ui/build/. setup.sh runs `npm run build` for you.
+# If you prefer to run the UI in dev mode (vite), set LS_UI_DEV=1 and the
+# manager will proxy / to http://127.0.0.1:5173 — useful for hot reload.
+UI_BUILD_DIR = BASE_DIR / "ui" / "build"
+STATIC_DIR = UI_BUILD_DIR
 LOG_DIR = BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
