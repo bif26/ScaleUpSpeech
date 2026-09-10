@@ -84,6 +84,7 @@ class WorkerSupervisor:
         self.worker_pid: Optional[int] = None
         self.worker_rss_mb: int = 0
         self.model_loaded: bool = False
+        self.worker_busy: bool = False   # active WS session(s) - never idle-kill
         self.start_count: int = 0
         self._worker_out = None
         self._lock = asyncio.Lock()
@@ -173,6 +174,7 @@ class WorkerSupervisor:
             self.worker_pid = None
             self.worker_rss_mb = 0
             self.model_loaded = False
+            self.worker_busy = False
             if self._worker_out:
                 try:
                     self._worker_out.close()
@@ -242,6 +244,12 @@ class WorkerSupervisor:
         self.worker_pid = int(payload.get("pid", self.worker_pid or 0)) or None
         self.worker_rss_mb = int(payload.get("rss_mb", self.worker_rss_mb))
         self.model_loaded = bool(payload.get("model_loaded", False))
+        # An open WS session counts as real usage. Without this the idle
+        # watchdog killed the worker 60 s into a captioning session that was
+        # simply quiet for a moment (audio flows only while the user speaks).
+        self.worker_busy = int(payload.get("active_sessions", 0) or 0) > 0
+        if self.worker_busy:
+            self.last_active = time.time()
         self.last_heartbeat = time.time()
         if self.state == "STARTING":
             self.state = "RUNNING"
@@ -252,6 +260,8 @@ class WorkerSupervisor:
             await asyncio.sleep(5)
             if self.state != "RUNNING":
                 continue
+            if self.worker_busy:
+                continue  # a live caption session is open - never kill it
             idle = time.time() - self.last_active
             if idle > config.WORKER_IDLE_TIMEOUT:
                 log.info("Worker idle for %.1fs, killing to free RAM", idle)
@@ -655,6 +665,16 @@ async def ws_proxy(ws_in: WebSocket) -> None:
         s = await supervisor.status()
     elif s["state"] == "FROZEN":
         await supervisor.thaw()
+    elif s["state"] == "STARTING":
+        # The worker is booting (auto-start was just triggered, e.g. by the
+        # page's pre-warm). Wait for it instead of slamming the socket shut -
+        # closing here made the browser fail its first connection with
+        # "ws closed before ready" whenever the user clicked Start quickly.
+        for _ in range(30):  # up to ~15 s
+            await asyncio.sleep(0.5)
+            s = await supervisor.status()
+            if s["state"] != "STARTING":
+                break
     if s["state"] != "RUNNING":
         await ws_in.close(code=1011, reason="worker not available")
         return
@@ -681,6 +701,12 @@ async def ws_proxy(ws_in: WebSocket) -> None:
                 try:
                     while True:
                         msg = await ws_in.receive()
+                        # Every forwarded frame is REAL usage: refresh the idle
+                        # timer so a long, active caption session is never
+                        # killed (the old code only touched the timer AFTER the
+                        # session ended, so the watchdog saw 100% idle the whole
+                        # time and cut the worker off mid-recording).
+                        supervisor.touch_active()
                         if msg.get("text") is not None:
                             await ws_out.send(msg["text"])
                             if msg["text"] == "END":

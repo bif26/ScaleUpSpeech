@@ -316,6 +316,10 @@ async def _heartbeat_loop() -> None:
                     "pid": psutil.Process().pid,
                     "rss_mb": rss,
                     "model_loaded": model_holder.is_loaded(),
+                    # Active WS sessions count as REAL usage: the manager
+                    # never idle-kills while this is > 0 (an open caption
+                    # session with a paused speaker must not get killed).
+                    "active_sessions": _ACTIVE_WS_SESSIONS,
                 })
         except Exception:
             # Manager may be briefly unreachable during restarts; not fatal.
@@ -342,6 +346,9 @@ def _transcribe(audio: np.ndarray, language: Optional[str],
 
     word_timestamps=False is measurably faster and is used for streaming
     partials in free-speech mode, where per-word timing is never used.
+    condition_on_previous_text=False: each streaming call gets a self-contained
+    window, so carrying whisper's internal context over buys nothing and is a
+    known source of repetition/hallucination loops (plus extra latency).
     """
     model = model_holder._model
     if model is None:
@@ -358,6 +365,7 @@ def _transcribe(audio: np.ndarray, language: Optional[str],
         },
         word_timestamps=word_timestamps,
         beam_size=config.BEAM_SIZE,
+        condition_on_previous_text=False,
     )
     out = []
     for s in segments:
@@ -476,6 +484,11 @@ async def heartbeat() -> dict:
 # ---------------------------------------------------------------------------
 # WebSocket endpoint for live streaming (used by the web UI, not the extension)
 # ---------------------------------------------------------------------------
+# Number of currently open streaming sessions. Reported to the manager via
+# the heartbeat so it never idle-kills the worker while a caption session
+# is live (the 60 s idle kill used to cut users off mid-recording).
+_ACTIVE_WS_SESSIONS = 0
+
 class StreamingSession:
     # Rolling-window tuning for streaming. We keep only the audio tail in
     # the buffer and move finished segments out (into settled_text /
@@ -487,6 +500,10 @@ class StreamingSession:
     SETTLE_MARGIN_S = 1.2   # a segment ends >= this far from buffer end -> settled
     TAIL_KEEP_S = 12.0      # never transcribe more than the last N seconds
                             # (whisper cost explodes with tail length on CPU)
+    # Live Caption transcribes a SHORTER window: captions want frequent
+    # updates, not long context, and the tail length is the main latency
+    # driver on CPU. Read-aloud mode keeps the longer window for accuracy.
+    LIVE_TAIL_KEEP_S = float(os.environ.get("LS_LIVE_TAIL_S", "8"))
 
     def __init__(self, ws: WebSocket, *, reference_text: str = "",
                  live_scoring: bool = True, target_language: str = "en") -> None:
@@ -506,6 +523,9 @@ class StreamingSession:
         self._prev_word_count: int = 0          # committed word count last round
         self.start_time = time.time()
         self.session_id = str(uuid.uuid4())
+        # Per-session transcription window: read-aloud mode wants maximal
+        # accuracy (long tail), Live Caption wants low latency (short tail).
+        self.tail_keep_s = self.TAIL_KEEP_S if reference_text else self.LIVE_TAIL_KEEP_S
         mode = "read+score" if reference_text else "live-caption"
         log.info("ws session %s start (mode=%s, lang=%s)",
                  self.session_id, mode, target_language)
@@ -558,8 +578,8 @@ class StreamingSession:
             return None
         self._last_len = len(self.buffer)
 
-        # Never transcribe more than the last TAIL_KEEP_S seconds.
-        max_samples = int(self.TAIL_KEEP_S * config.SAMPLE_RATE)
+        # Never transcribe more than the last tail_keep_s seconds.
+        max_samples = int(self.tail_keep_s * config.SAMPLE_RATE)
         if len(self.buffer) > max_samples:
             window = self.buffer[-max_samples:]
         else:
@@ -658,10 +678,10 @@ class StreamingSession:
         if settled_until is not None:
             self._settled_until_s = max(self._settled_until_s, settled_until)
             self._trim_to(settled_until - 0.25)
-        elif len(self.buffer) > int(self.TAIL_KEEP_S * config.SAMPLE_RATE):
+        elif len(self.buffer) > int(self.tail_keep_s * config.SAMPLE_RATE):
             # Safety valve: extremely long utterance with no segment boundary -
             # still cap the buffer so latency cannot grow without bound.
-            self._trim_to(self._abs_end_s() - self.TAIL_KEEP_S)
+            self._trim_to(self._abs_end_s() - self.tail_keep_s)
 
     async def _emit_incremental(self) -> None:
         if not self.reference_text:
@@ -722,6 +742,7 @@ class StreamingSession:
 
 @app.websocket("/ws/transcribe")
 async def ws_transcribe(ws: WebSocket) -> None:
+    global _ACTIVE_WS_SESSIONS
     await ws.accept()
     try:
         cfg_raw = await asyncio.wait_for(ws.receive_text(), timeout=10.0)
@@ -737,6 +758,7 @@ async def ws_transcribe(ws: WebSocket) -> None:
         live_scoring=cfg.get("live_scoring", True),
         target_language=cfg.get("target_language", config.DEFAULT_LANGUAGE),
     )
+    _ACTIVE_WS_SESSIONS += 1
 
     # IMPORTANT: ensure the Whisper model is loaded BEFORE we send 'ready'.
     # The WS path calls _transcribe() directly (which uses model_holder._model),
@@ -799,6 +821,7 @@ async def ws_transcribe(ws: WebSocket) -> None:
     except Exception as e:
         log.exception("ws error: %s", e)
     finally:
+        _ACTIVE_WS_SESSIONS = max(0, _ACTIVE_WS_SESSIONS - 1)
         try:
             await ws.close()
         except Exception:

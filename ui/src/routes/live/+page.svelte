@@ -42,7 +42,7 @@
     { value: 'auto', label: 'Auto-detect' },
   ];
 
-  const workerUp = $derived(health()?.worker?.state === 'RUNNING');
+  const workerUp = $derived($health?.worker?.state === 'RUNNING');
 
   function fmtTime(s: number): string {
     const m = Math.floor(s / 60);
@@ -68,72 +68,89 @@
   async function start() {
     partialText = '';
     connecting = true;
+    recording = false;
     stateText = workerUp ? 'connecting…' : 'waking AI worker…';
 
-    // Auto-link with the model: ask the manager to start the worker now, so
-    // the model loads while the browser asks for mic permission.
-    if (autoStart) {
-      try { await apiClient.startWorker(); } catch { /* the WS proxy retries anyway */ }
-    }
+    try {
+      // Auto-link with the model: ask the manager to start the worker now, so
+      // the model loads while the browser asks for mic permission.
+      if (autoStart) {
+        try { await apiClient.startWorker(); } catch { /* the WS proxy retries anyway */ }
+      }
 
-    recorder = new Recorder();
-    recorder.onChunk = (pcm) => session?.sendPcm(pcm);
-    recorder.onLevel = (rms) => { vuLevel = Math.min(100, rms * 300); };
+      recorder = new Recorder();
+      recorder.onChunk = (pcm) => session?.sendPcm(pcm);
+      recorder.onLevel = (rms) => { vuLevel = Math.min(100, rms * 300); };
 
-    try { await recorder.start(); }
-    catch (e: any) {
-      toastStore.error('Microphone failed: ' + e.message);
-      connecting = false;
-      recorder = null;
-      return;
-    }
+      try { await recorder.start(); }
+      catch (e: any) {
+        toastStore.error('Microphone failed: ' + e.message);
+        connecting = false;
+        recorder = null;
+        return;
+      }
 
-    session = new TranscribeSession(
-      { referenceText: '', liveScoring: false, language },
-      {
-        onOpen: () => {
-          connecting = false;
-          recording = true;
-          stateText = 'Listening…';
-          elapsed = 0;
-          timer = setInterval(() => { elapsed += 0.25; }, 250);
-        },
-        onMessage: (frame) => {
-          if (frame.type === 'partial') {
-            const p = frame as PartialFrame;
-            partialText = p.text;
-            stateText = 'Listening…';
-          } else if (frame.type === 'final') {
-            const f: any = frame;
-            partialText = '';
-            if (f.recognized) {
-              pushTranscript(f.recognized);
-            } else if (!transcript) {
-              // Make silence visible instead of a mysterious empty result.
-              toastStore.error('No speech detected — check the mic and speak a bit louder');
-            }
-            stateText = 'Paused';
-          }
-        },
-        onClose: () => {
-          if (recording || connecting) {
-            recording = false;
+      session = new TranscribeSession(
+        { referenceText: '', liveScoring: false, language },
+        {
+          onOpen: () => {
             connecting = false;
-            stateText = 'Disconnected';
-            toastStore.error('Connection to the AI worker was lost');
-          }
+            recording = true;
+            stateText = 'Listening…';
+            elapsed = 0;
+            timer = setInterval(() => { elapsed += 0.25; }, 250);
+          },
+          onMessage: (frame) => {
+            if (frame.type === 'partial') {
+              const p = frame as PartialFrame;
+              partialText = p.text;
+              stateText = 'Listening…';
+            } else if (frame.type === 'final') {
+              const f: any = frame;
+              partialText = '';
+              if (f.recognized) {
+                pushTranscript(f.recognized);
+              } else if (!transcript) {
+                // Make silence visible instead of a mysterious empty result.
+                toastStore.error('No speech detected — check the mic and speak a bit louder');
+              }
+              stateText = 'Paused';
+            }
+          },
+          onClose: () => {
+            if (recording || connecting) {
+              recording = false;
+              connecting = false;
+              stateText = 'Disconnected';
+              toastStore.error('Connection to the AI worker was lost');
+            }
+          },
+          onError: () => {},
         },
-        onError: () => {},
-      },
-    );
+      );
 
-    try { await session.open(); }
-    catch (e: any) {
-      toastStore.error('Connection failed: ' + (e?.message || 'worker unreachable'));
+      try { await session.open(); }
+      catch (e: any) {
+        toastStore.error('Connection failed: ' + (e?.message || 'worker unreachable'));
+        recording = false;
+        connecting = false;
+        stateText = 'Idle';
+        await recorder.stop();
+        recorder = null;
+      }
+    } catch (e: any) {
+      // NEVER wedge the button: any unexpected error resets the UI instead of
+      // leaving it stuck on 'connecting' forever (this used to happen when
+      // start() crashed halfway through).
+      console.error('[live] start failed:', e);
+      toastStore.error('Could not start captioning: ' + (e?.message || 'unknown error'));
       recording = false;
       connecting = false;
-      await recorder.stop();
+      stateText = 'Idle';
+      try { await recorder?.stop(); } catch { /* ignore */ }
       recorder = null;
+      try { session?.close(); } catch { /* ignore */ }
+      session = null;
     }
   }
 
@@ -257,7 +274,7 @@
         <div class="flex-1"></div>
         <span class="text-sm text-muted-foreground">
           {#if connecting}
-            {stateText} · model {health?.worker?.model_loaded ? 'loaded' : 'loading…'}
+            {stateText} · model {$health?.worker?.model_loaded ? 'loaded' : 'loading…'}
           {:else}
             {stateText}
           {/if}
@@ -320,9 +337,15 @@
     </CardHeader>
     <CardContent class="text-sm text-muted-foreground space-y-2">
       <p>
-        The worker stays hot for <span class="font-mono">{health?.worker?.idle_timeout ?? 60}s</span>
-        after you stop speaking, then the manager kills it to free RAM — so you
-        can pause for a coffee; only the in-progress partial line is lost.
+        The worker stays hot for <span class="font-mono">{$health?.worker?.idle_timeout ?? 300}s</span>
+        after you stop, and a running caption session is never killed — then
+        the manager frees the RAM. Pausing for a moment is safe; only the
+        in-progress partial line is lost when you stop.
+      </p>
+      <p>
+        Captions feel slow on a laptop CPU? Run the stack with a smaller
+        model: <code class="font-mono text-xs">LS_MODEL=base ./start_manager.sh</code>
+        (or <code class="font-mono text-xs">tiny</code> — fastest, lower accuracy).
       </p>
       <p>
         Want scoring instead? Paste the text into

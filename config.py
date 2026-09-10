@@ -51,7 +51,10 @@ WORKER_RAM_SAMPLE_INTERVAL = 5
 # Worker lifecycle
 # ---------------------------------------------------------------------------
 # Worker is auto-killed after this many seconds of no requests, freeing RAM.
-WORKER_IDLE_TIMEOUT = int(os.environ.get("LS_IDLE_TIMEOUT", "60"))
+# Default raised 60 -> 300: killing after 60 s felt instant to users and made
+# every pause cost a full model reload. With busy-tracking (active WS sessions
+# block the kill entirely, see manager.py) 300 s is a safe, friendlier default.
+WORKER_IDLE_TIMEOUT = int(os.environ.get("LS_IDLE_TIMEOUT", "300"))
 
 # When manager is told to "freeze", worker is suspended (SIGSTOP) instead of
 # killed, so it can be thawed instantly. RAM is NOT freed while frozen.
