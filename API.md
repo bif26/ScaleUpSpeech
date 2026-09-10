@@ -359,3 +359,105 @@ Try `auto` to let Whisper detect.
 The worker has `Access-Control-Allow-Origin: *` enabled, so calls from
 any origin work. Preflight (`OPTIONS`) responses include the standard
 `Access-Control-Allow-Methods` and `Access-Control-Allow-Headers` headers.
+
+---
+
+## Exam Trainer API (manager, port 8765)
+
+Two lightweight endpoints power the `/exam` page. They live on the
+**manager** (file scanning + Markdown building — no model, no numpy), so
+they answer even when the worker is stopped. CORS is the same policy as the
+rest of the stack.
+
+### `GET http://127.0.0.1:8765/api/exam/tasks`
+
+Returns every task found in `tasks/<LEVEL>/*.{md,json}`:
+
+```json
+{
+  "levels": ["A2", "B1", "B2"],
+  "tasks": [
+    {
+      "level": "B1",
+      "slug": "01_sprachkurs_anrufen",
+      "file": "01_sprachkurs_anrufen.md",
+      "title": "Telefonische Anfrage: Sprachkurs",
+      "exam": "Goethe-Zertifikat B1",
+      "exam_source": "Formatübung nach ...",
+      "task_type": "Telefonische Anfrage",
+      "situation": "Sie möchten einen Sprachkurs besuchen. ...",
+      "requirements": ["Begrüßung und Vorstellung", "..."],
+      "prep_seconds": 60,
+      "speak_seconds": 120,
+      "language": "de-DE",
+      "description": "..."
+    }
+  ]
+}
+```
+
+The folder name decides the level; adding a task = dropping a file in
+`tasks/<LEVEL>/` (form + field reference in `tasks/README.md`).
+
+### `POST http://127.0.0.1:8765/api/exam/export`
+
+Builds the ONE self-contained Markdown assessment file the learner pastes
+into any LLM (the full rubric travels inside the file).
+
+Request:
+
+```json
+{
+  "level": "B1",
+  "slug": "01_sprachkurs_anrufen",
+  "transcript": "Guten Tag, ich möchte einen Sprachkurs machen ...",
+  "words": [{"word": "Guten", "start": 0.0, "end": 0.2, "probability": 0.98}],
+  "metrics": {"wpm_net": 132, "pause_count": 3},
+  "duration_s": 95.4
+}
+```
+
+Only `level` + `slug` are mandatory together with at least the transcript
+or word data; `metrics` is recomputed from `words` when omitted, and the
+file falls back gracefully when there is no word-level data at all.
+
+Response:
+
+```json
+{
+  "filename": "assessment_B1_01_sprachkurs_anrufen_20260910_1200.md",
+  "markdown": "# CEFR Speaking Assessment — ...",
+  "task": {"level": "B1", "slug": "01_sprachkurs_anrufen", "title": "...", "exam": "..."}
+}
+```
+
+Errors: `404` unknown task, `400` empty transcript **and** empty words.
+
+### WebSocket `mode: "exam"` (`/ws/transcribe`)
+
+The Exam page streams the recording over the same browser WebSocket as
+Read/Live, with one extra config field:
+
+```json
+{"reference_text": "", "live_scoring": false, "target_language": "de-DE", "mode": "exam"}
+```
+
+Exam mode behaves like read+score (stable segments are settled **with**
+word-level data) but emits live-caption style `partial` frames, and the
+`final` frame contains:
+
+```json
+{
+  "type": "final",
+  "status": "OK",
+  "recognized": "Guten Tag, ...",
+  "words": [{"word": "Guten", "start": 0.0, "end": 0.2, "probability": 0.98}],
+  "evidence": {"words": [...], "summary": {"ok_pct": 87.5, "...": 0}},
+  "metrics": {"word_count": 180, "wpm_net": 128, "pause_count": 4, "fillers": {"äh": 3}},
+  "duration_s": 97.2
+}
+```
+
+`words`/`metrics`/`evidence` are exactly what `/api/exam/export` expects.
+Omitting `mode` keeps the old behaviour (read+score when `reference_text`
+is set, live-caption otherwise), so existing clients are unaffected.

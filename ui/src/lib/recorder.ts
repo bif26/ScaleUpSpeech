@@ -175,10 +175,11 @@ export class TranscribeSession {
     reference_text: string;
     live_scoring: boolean;
     target_language: string;
+    mode?: string;
   };
 
   constructor(
-    cfg: { referenceText: string; liveScoring: boolean; language: string },
+    cfg: { referenceText: string; liveScoring: boolean; language: string; mode?: string },
     private handlers: {
       onOpen?: (data: any) => void;
       onMessage?: (frame: ServerFrame) => void;
@@ -191,6 +192,9 @@ export class TranscribeSession {
       live_scoring: cfg.liveScoring,
       target_language: cfg.language,
     };
+    // Optional explicit session mode (e.g. "exam" for the Exam page).
+    // Omitted for old pages so the worker keeps deriving it as before.
+    if (cfg.mode) this.cfg.mode = cfg.mode;
   }
 
   open(): Promise<void> {

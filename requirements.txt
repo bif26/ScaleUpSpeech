@@ -21,6 +21,10 @@ numpy>=1.26.4
 psutil>=5.9.8
 rapidfuzz>=3.7.0
 phonetics>=1.0.5
+# Exam page task files (tasks/<LEVEL>/*.md) use YAML frontmatter. exam.py
+# also ships a built-in fallback parser, so a missing pyyaml is not fatal —
+# but installing it gives bullet-proof parsing of user-authored task files.
+pyyaml>=6.0.1
 # Model-download deps. download_model.py also auto-installs these on demand
 # (so it works on a bare system Python too), but pinning them here means a
 # normal `./setup.sh` install already has them — no surprise pip install

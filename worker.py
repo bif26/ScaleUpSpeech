@@ -60,6 +60,7 @@ from pydantic import BaseModel
 
 import config
 from scoring import score_assessment, incremental_score
+import exam  # pure-stdlib CEFR exam helpers (metrics + evidence)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -506,11 +507,23 @@ class StreamingSession:
     LIVE_TAIL_KEEP_S = float(os.environ.get("LS_LIVE_TAIL_S", "8"))
 
     def __init__(self, ws: WebSocket, *, reference_text: str = "",
-                 live_scoring: bool = True, target_language: str = "en") -> None:
+                 live_scoring: bool = True, target_language: str = "en",
+                 mode: str = "") -> None:
         self.ws = ws
         self.reference_text = reference_text
         self.live_scoring = live_scoring
         self.target_language = target_language
+        # Session mode. Empty -> derived from the config for backwards
+        # compatibility: reference_text present = read+score, else live-caption.
+        # "exam" = free speech (no reference) but WITH word-level data: it
+        # settles stable segments exactly like read+score (so the final word
+        # list is complete and deduplicated) and streams live partials like
+        # live-caption. finalize() then returns the full evidence the Exam
+        # page exports into the LLM assessment file.
+        self.mode = mode or ("read+score" if reference_text else "live-caption")
+        if self.mode == "exam":
+            self.reference_text = ""
+            self.live_scoring = False
         self.buffer: np.ndarray = np.zeros(0, dtype=np.float32)
         self.committed_segments: List[dict] = []
         self.settled_text: str = ""             # free-speech mode: finished transcript
@@ -525,10 +538,13 @@ class StreamingSession:
         self.session_id = str(uuid.uuid4())
         # Per-session transcription window: read-aloud mode wants maximal
         # accuracy (long tail), Live Caption wants low latency (short tail).
-        self.tail_keep_s = self.TAIL_KEEP_S if reference_text else self.LIVE_TAIL_KEEP_S
-        mode = "read+score" if reference_text else "live-caption"
+        # Exam behaves like read-aloud (12 s): accuracy beats latency and the
+        # tail is only used for the live preview text.
+        self.tail_keep_s = (self.TAIL_KEEP_S
+                            if self.mode in ("read+score", "exam")
+                            else self.LIVE_TAIL_KEEP_S)
         log.info("ws session %s start (mode=%s, lang=%s)",
-                 self.session_id, mode, target_language)
+                 self.session_id, self.mode, target_language)
 
     # -- buffer / timeline helpers -----------------------------------------
     def _abs_end_s(self) -> float:
@@ -605,11 +621,11 @@ class StreamingSession:
         if len(self.buffer) < min_samples:
             return
 
-        segments = await self._run_transcribe(bool(self.reference_text))
+        segments = await self._run_transcribe(self.mode != "live-caption")
         if segments is None:  # pacing: not enough new audio yet
             return
 
-        if not self.reference_text:
+        if self.mode == "live-caption":
             # Live Caption mode: emit the running transcript and roll the
             # buffer forward so we only ever transcribe the recent tail.
             await self._emit_partial(segments)
@@ -617,7 +633,8 @@ class StreamingSession:
             self._last_len = len(self.buffer)
             return
 
-        # Read-aloud mode: keep every stable segment, re-transcribe the tail.
+        # Read-aloud AND Exam mode: keep every stable segment (with word-level
+        # data), re-transcribe the tail.
         buf_end = self._abs_end_s()
         fresh, tail = [], []
         for s in segments:
@@ -636,8 +653,29 @@ class StreamingSession:
         grew = new_count > self._prev_word_count
         self._prev_word_count = new_count
         self._last_len = len(self.buffer)
-        if grew and self.live_scoring:
+        if self.mode == "exam":
+            await self._emit_exam_partial()
+        elif grew and self.live_scoring:
             await self._emit_incremental()
+
+    async def _emit_exam_partial(self) -> None:
+        """Exam mode: running transcript preview (settled + tail text)."""
+        parts = [s.get("text", "").strip() for s in self.committed_segments]
+        full = " ".join(p for p in parts if p).strip()
+        if not full or full == self._last_partial:
+            return
+        self._last_partial = full
+        payload = {
+            "type": "partial",
+            "session_id": self.session_id,
+            "text": full,
+            "words": len(full.split()),
+            "elapsed_s": round(time.time() - self.start_time, 2),
+        }
+        try:
+            await self.ws.send_text(json.dumps(payload))
+        except Exception:
+            log.debug("ws send failed during exam partial")
 
     async def _emit_partial(self, segments: List[dict]) -> None:
         text = " ".join(s.get("text", "").strip() for s in segments).strip()
@@ -694,6 +732,38 @@ class StreamingSession:
         except Exception:
             log.debug("ws send failed during incremental")
 
+    def _merge_exam_segments(self, tail_segments: List[dict]) -> List[dict]:
+        """Settled segments + final tail, deduplicated by the settled boundary.
+
+        The finalize transcribe re-runs over the un-settled sliver of the
+        buffer, which starts ~0.25 s BEFORE _settled_until_s, so the tail can
+        re-detect the last settled segment. Anything that ends before the
+        settled boundary is dropped; a straddling segment keeps only the words
+        that start after it. (Read+score mode does not need this - the scorer
+        aligns against a reference, which absorbs duplicates.)
+        """
+        out: List[dict] = [dict(s) for s in self.settled_segments]
+        boundary = self._settled_until_s
+        for s in tail_segments or []:
+            try:
+                end = float(s.get("end", 0.0))
+            except (TypeError, ValueError):
+                end = 0.0
+            if end <= boundary + 0.05:
+                continue  # fully inside settled territory
+            words = s.get("words") or []
+            kept = [w for w in words
+                    if float(w.get("start", 0.0) or 0.0) > boundary - 0.05]
+            if not kept:
+                continue
+            s2 = dict(s)
+            s2["words"] = kept
+            s2["start"] = float(kept[0].get("start", s.get("start", 0.0)) or 0.0)
+            s2["text"] = " ".join(str(w.get("word", "")) for w in kept).strip()
+            out.append(s2)
+        out.sort(key=lambda s: float(s.get("start", 0.0) or 0.0))
+        return out
+
     async def finalize(self) -> dict:
         segments: List[dict] = []
         if len(self.buffer) >= int(config.SAMPLE_RATE * 0.1):
@@ -707,7 +777,39 @@ class StreamingSession:
                 log.exception("finalize transcribe failed: %s", e)
                 segments = []
 
-        if self.reference_text:
+        if self.mode == "exam":
+            # Exam mode: full word-level evidence + fluency metrics for the
+            # CEFR assessment export. Segments settled during streaming carry
+            # their words already; the final tail is merged in with overlap
+            # removal (see _merge_exam_segments).
+            merged = self._merge_exam_segments(segments)
+            flat_words: List[dict] = []
+            for s in merged:
+                for w in (s.get("words") or []):
+                    if (w.get("word") or "").strip():
+                        flat_words.append(w)
+            recognized = " ".join(
+                s.get("text", "").strip() for s in merged).strip()
+            if not recognized and flat_words:
+                recognized = " ".join(str(w.get("word", "")).strip()
+                                      for w in flat_words).strip()
+            if not recognized:
+                payload = {
+                    "status": "ERROR",
+                    "error": "No speech detected. Please speak louder or "
+                             "closer to the microphone.",
+                }
+            else:
+                duration = time.time() - self.start_time
+                payload = {
+                    "status": "OK",
+                    "recognized": recognized,
+                    "words": flat_words,  # raw word dicts (word/start/end/probability)
+                    "evidence": exam.word_evidence(flat_words),
+                    "metrics": exam.compute_speech_metrics(flat_words, duration),
+                    "segments": merged,
+                }
+        elif self.reference_text:
             # Score everything: stable segments accumulated during streaming
             # plus whatever is still in the rolling tail.
             payload = score_assessment(self.reference_text,
@@ -757,6 +859,7 @@ async def ws_transcribe(ws: WebSocket) -> None:
         reference_text=cfg.get("reference_text", ""),
         live_scoring=cfg.get("live_scoring", True),
         target_language=cfg.get("target_language", config.DEFAULT_LANGUAGE),
+        mode=cfg.get("mode", ""),
     )
     _ACTIVE_WS_SESSIONS += 1
 

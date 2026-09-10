@@ -1,6 +1,6 @@
 /* LanguageShadow REST API client */
 
-import type { AssessResponse, HealthResponse, SystemLogResponse } from './types';
+import type { AssessResponse, ExamExportResponse, ExamTask, HealthResponse, SystemLogResponse } from './types';
 
 const API_BASE = `http://${location.hostname}:8765`;
 const WS_URL = `ws://${location.hostname}:8765/ws/transcribe`;
@@ -78,6 +78,22 @@ export const apiClient = {
     language: string;
   }): Promise<AssessResponse> {
     return api('/api/assess-speech', 'POST', payload);
+  },
+
+  /* Exam page (CEFR speaking practice) — manager-side, always available. */
+  examTasks(): Promise<{ levels: string[]; tasks: ExamTask[] }> {
+    return api('/api/exam/tasks');
+  },
+
+  examExport(payload: {
+    level: string;
+    slug: string;
+    transcript: string;
+    words: Array<{ word: string; start: number; end: number; probability: number }>;
+    metrics?: any;
+    duration_s?: number;
+  }): Promise<ExamExportResponse> {
+    return api('/api/exam/export', 'POST', payload);
   },
 
   wsUrl: WS_URL,

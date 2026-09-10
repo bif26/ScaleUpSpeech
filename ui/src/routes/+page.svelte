@@ -36,7 +36,7 @@
 
   <Card>
     <CardHeader>
-      <CardTitle>Three modes</CardTitle>
+      <CardTitle>Modes</CardTitle>
     </CardHeader>
     <CardContent class="space-y-3">
       <div>
@@ -46,6 +46,10 @@
       <div>
         <a href="/read" class="font-medium text-lavender hover:underline">Read Text</a>
         <span class="text-muted-foreground"> — paste a passage from a book, read it aloud, get an overall score plus every wrong word.</span>
+      </div>
+      <div>
+        <a href="/exam" class="font-medium text-lavender hover:underline">Exam</a>
+        <span class="text-muted-foreground"> — German speaking tasks in the Goethe / ÖSD / telc format (A2–B2); export one file, paste it into any LLM, get an official-style CEFR score out of 100.</span>
       </div>
       <div>
         <a href="/youtube" class="font-medium text-lavender hover:underline">YouTube</a>

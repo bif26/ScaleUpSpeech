@@ -142,7 +142,7 @@ systemctl --user enable --now languageshadow-manager
 
 ---
 
-## The four pages
+## The five pages
 
 ### 1. `/live` — Live Caption
 Free speech mode: click **Start captioning** and just talk — Whisper
@@ -170,7 +170,35 @@ Cities*). Click **Start reading** and read it aloud. At the end you get:
 
 Optionally enable **live scoring** so you see your progress as you speak.
 
-### 3. `/youtube` — YouTube Helper
+### 3. `/exam` — Exam Trainer (German A2–B2)
+CEFR speaking practice in the real **Goethe / ÖSD / telc** exam format:
+
+1. **Pick a level and a task** — tasks live in `tasks/A2/`, `tasks/B1/`,
+   `tasks/B2/` as plain Markdown files with YAML frontmatter. Adding a task
+   = dropping a file in the folder (see `tasks/README.md`); it appears in
+   the UI immediately, no restart.
+2. **Prep** — the situation and the required points are shown, with a
+   countdown (`prep_seconds`).
+3. **Speak** — recording starts automatically after prep (or press
+   "Start speaking now"); you see a live transcript preview and the
+   remaining time; recording auto-stops after `speak_seconds`, exactly like
+   the real exam cuts you off.
+4. **Result** — full transcript, fluency metrics (words, net WPM, pauses
+   > 0.5 s, longest pause, filled pauses like äh/ähm) and every word the
+   recogniser was unsure about.
+5. **Export assessment file** — one self-contained Markdown file with the
+   task, the measured performance, the word-level pronunciation evidence
+   and the complete official-style rubric (5 criteria: Task Fulfillment 30 %,
+   Coherence 15 %, Vocabulary 20 %, Grammar 20 %, Pronunciation 15 %).
+   Copy it into **any LLM** — ChatGPT, Claude, Gemini or a local model —
+   and it acts as a German CEFR examiner: score out of 100, CEFR level,
+   pass/borderline/fail, per-criterion feedback and a German summary.
+   No API key, no account, no subscription — the rubric travels inside the file.
+
+The transcript runs through the same worker WebSocket as the other pages
+(with `mode: "exam"`), so the model stays warm and results stay fast.
+
+### 4. `/youtube` — YouTube Helper
 Use your **existing** Shadowing browser extension — it sends the caption
 line it captured and the user's recording to
 `POST http://127.0.0.1:8000/api/assess-speech` (per the `API.md` contract).
@@ -181,7 +209,7 @@ The YouTube page also shows the complete API contract inline, plus a live
 caption inbox (if your extension posts captions to `/api/caption`, you
 can load them as practice reference).
 
-### 4. `/logs` — Logs
+### 5. `/logs` — Logs
 Everything the stack prints, in one place:
 
 - **Aggregate stats** — total assessments, audio seconds, running averages
@@ -316,6 +344,7 @@ languageshadow/
 ├── manager.py             # lightweight controller (port 8765)
 ├── worker.py              # heavy AI process (port 8000, on-demand)
 ├── scoring.py             # Metaphone scoring + CEFR + pause penalty
+├── exam.py                # Exam page: task parser, speech metrics, CEFR MD export
 ├── config.py              # all tunables (env-var overridable)
 ├── requirements.txt
 ├── setup.sh               # install venv + build UI
@@ -323,6 +352,9 @@ languageshadow/
 ├── start_manager.sh       # launch manager in background
 ├── stop_backend.sh        # kill manager + worker
 ├── API.md                 # extension API contract (input/output examples)
+├── tasks/                 # Exam task library (drop a .md file = new task)
+│   ├── README.md          # task file form + field reference
+│   ├── A2/  B1/  B2/      # one .md file per exam task (Goethe/ÖSD/telc format)
 ├── languages/             # JSON config per language
 │   ├── en.json
 │   ├── es.json
@@ -341,6 +373,7 @@ languageshadow/
 │   │   │   ├── +page.svelte    # Home
 │   │   │   ├── live/+page.svelte
 │   │   │   ├── read/+page.svelte
+│   │   │   ├── exam/+page.svelte   # Exam Trainer (German A2–B2)
 │   │   │   ├── youtube/+page.svelte
 │   │   │   └── logs/+page.svelte   # system logs + worker stdout + practice history
 │   │   └── lib/

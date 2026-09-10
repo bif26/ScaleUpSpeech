@@ -13,6 +13,7 @@
   import YoutubeIcon from 'lucide-svelte/icons/youtube';
   import ActivityIcon from 'lucide-svelte/icons/activity';
   import LogsIcon from 'lucide-svelte/icons/scroll-text';
+  import GradCapIcon from 'lucide-svelte/icons/graduation-cap';
 
   let { children } = $props();
 
@@ -20,6 +21,7 @@
     { href: '/',         label: 'Home',         icon: HomeIcon },
     { href: '/live',     label: 'Live Caption', icon: MicIcon },
     { href: '/read',     label: 'Read Text',    icon: BookIcon },
+    { href: '/exam',     label: 'Exam',         icon: GradCapIcon },
     { href: '/youtube',  label: 'YouTube',      icon: YoutubeIcon },
     { href: '/logs',     label: 'Logs',         icon: LogsIcon },
   ];

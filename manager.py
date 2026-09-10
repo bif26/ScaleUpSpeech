@@ -28,7 +28,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Deque, Optional
+from typing import Deque, List, Optional
 
 import psutil
 import uvicorn
@@ -40,6 +40,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import config
+import exam as exam_lib  # pure-stdlib CEFR exam helpers (task library + MD export)
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -489,6 +490,59 @@ async def api_health() -> dict:
         "worker": s,
         "ram_budget_mb": config.RAM_BUDGET_MB,
         "model": config.MODEL_NAME,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CEFR Exam Trainer API — task library + assessment export
+# ---------------------------------------------------------------------------
+# Both endpoints are LIGHTWEIGHT (file scanning + markdown building; no model,
+# no numpy) so they live on the always-on manager. The heavy part — turning
+# the recording into words — still happens in the worker over the existing
+# /ws/transcribe WebSocket with mode:"exam" (see worker.py).
+@app.get("/api/exam/tasks")
+async def exam_tasks() -> dict:
+    """All exam tasks from tasks/<LEVEL>/*.md|json (adding a task = dropping
+    a file in the folder — no code changes, no restart needed)."""
+    return {"levels": list(exam_lib.LEVELS), "tasks": exam_lib.list_tasks()}
+
+
+class ExamExportRequest(BaseModel):
+    level: str
+    slug: str
+    transcript: str = ""
+    words: List[dict] = []
+    metrics: Optional[dict] = None
+    duration_s: Optional[float] = None
+    recorded_at: Optional[str] = None
+
+
+@app.post("/api/exam/export")
+async def exam_export(req: ExamExportRequest) -> dict:
+    """Build the ONE self-contained Markdown file the learner pastes into any
+    LLM (ChatGPT/Claude/Gemini/local) to get the official-style CEFR score."""
+    task = exam_lib.find_task(req.level, req.slug)
+    if task is None:
+        return JSONResponse(
+            {"error": f"unknown task {req.level}/{req.slug}"}, status_code=404)
+    if not req.transcript.strip() and not req.words:
+        return JSONResponse(
+            {"error": "nothing to export: no transcript and no word data"},
+            status_code=400)
+    metrics = req.metrics or exam_lib.compute_speech_metrics(
+        req.words, req.duration_s)
+    data = {
+        "transcript": req.transcript,
+        "words": req.words,
+        "metrics": metrics,
+        "duration_s": req.duration_s or metrics.get("duration_s"),
+        "recorded_at": req.recorded_at,
+    }
+    markdown = exam_lib.build_assessment_markdown(task, data)
+    return {
+        "filename": exam_lib.export_filename(task, data),
+        "markdown": markdown,
+        "task": {k: task.get(k) for k in ("level", "slug", "title", "exam")},
     }
 
 
