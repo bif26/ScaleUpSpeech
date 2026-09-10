@@ -36,6 +36,7 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import statistics
 import struct
 import subprocess
@@ -50,6 +51,8 @@ from typing import Any, Deque, Dict, List, Optional
 import numpy as np
 import psutil
 import uvicorn
+
+import model_cache
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -117,8 +120,68 @@ def decode_audio_to_pcm(audio_bytes: bytes) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Model holder (loaded lazily)
+# Model holder (loaded lazily, self-healing against a corrupt HF cache)
 # ---------------------------------------------------------------------------
+def _load_model_with_selfheal(model_kwargs: dict):
+    """Load the whisper model, repairing a corrupt local HF cache on the way.
+
+    Stages (each logged loudly so behavior is visible in logs/worker.out):
+      1. Pure-local load (no network) — the normal instant path.
+      2. On failure: sanitize the cache (delete 0-byte phantom files such as
+         an empty vocabulary.json, which crashes CTranslate2 with
+         "[json.exception.parse_error.101]" even when a valid vocabulary.txt
+         sits next to it) and retry the pure-local load.
+      3. Still failing: allow hub downloads (fills a genuinely missing model).
+      4. Still failing: purge this model's cache folder entirely and make a
+         final clean download attempt.
+    """
+    from faster_whisper import WhisperModel
+
+    # Stage 1 — pure local, no network.
+    try:
+        return WhisperModel(config.MODEL_NAME, local_files_only=True,
+                            **model_kwargs)
+    except Exception as first_err:
+        log.warning("Model load from local cache failed: %s", first_err)
+
+    # Stage 2 — sanitize corrupt leftovers, retry pure local.
+    try:
+        removed = model_cache.sanitize_model_cache(config.MODEL_NAME)
+    except Exception as sanitize_err:
+        log.warning("Cache sanitize failed: %s", sanitize_err)
+        removed = []
+    if removed:
+        log.warning("Self-heal: removed corrupt 0-byte cache files: %s",
+                    ", ".join(os.path.basename(p) for p in removed))
+        try:
+            return WhisperModel(config.MODEL_NAME, local_files_only=True,
+                                **model_kwargs)
+        except Exception as err:
+            log.warning("Model still failing after cache sanitize: %s", err)
+    else:
+        log.info("No corrupt 0-byte files in cache — model files are missing "
+                 "or corrupt in another way.")
+
+    # Stage 3 — download once through the hub (visible progress bars).
+    log.info("Model not in local cache — downloading once...")
+    try:
+        return WhisperModel(config.MODEL_NAME, **model_kwargs)
+    except Exception as err:
+        log.error("Model download/load failed: %s", err)
+
+    # Stage 4 — purge this model's cache folder, final clean download.
+    try:
+        purged = model_cache.purge_model_cache(config.MODEL_NAME)
+    except Exception as purge_err:
+        log.warning("Cache purge failed: %s", purge_err)
+        purged = False
+    if purged:
+        log.warning("Self-heal: purged the model cache folder for a clean "
+                    "re-download.")
+    log.warning("Final attempt: fresh download of '%s'...", config.MODEL_NAME)
+    return WhisperModel(config.MODEL_NAME, **model_kwargs)
+
+
 class ModelHolder:
     def __init__(self) -> None:
         self._model = None
@@ -131,7 +194,6 @@ class ModelHolder:
                 log.info("Loading whisper model '%s' (compute=%s, device=%s)...",
                          config.MODEL_NAME, config.MODEL_COMPUTE_TYPE, config.MODEL_DEVICE)
                 t0 = time.perf_counter()
-                from faster_whisper import WhisperModel
                 # cpu_threads MUST be an int: ctranslate2 rejects None
                 # ("TypeError: incompatible constructor arguments").
                 # config.MODEL_CPU_THREADS is always an int (0 = auto).
@@ -140,17 +202,11 @@ class ModelHolder:
                     compute_type=config.MODEL_COMPUTE_TYPE,
                     cpu_threads=config.MODEL_CPU_THREADS,
                 )
-                try:
-                    # Fast path: model already in the local HF cache.
-                    # Pure disk, no network, instant start, works offline.
-                    self._model = WhisperModel(
-                        config.MODEL_NAME, local_files_only=True, **model_kwargs)
-                except Exception:
-                    # Model truly missing: download it once (visible progress
-                    # bars from huggingface_hub). Every later run takes the
-                    # fast path above and never downloads again.
-                    log.info("Model not in local cache — downloading once...")
-                    self._model = WhisperModel(config.MODEL_NAME, **model_kwargs)
+                # Run the (possibly minutes-long) load/download in a thread so
+                # the event loop keeps serving _heartbeat_loop — a blocked
+                # loop makes the manager kill a healthy, downloading worker.
+                self._model = await asyncio.to_thread(
+                    _load_model_with_selfheal, model_kwargs)
                 self._load_time = time.perf_counter() - t0
                 log.info("Whisper model loaded in %.2fs (PID %d, RSS %d MB)",
                          self._load_time, psutil.Process().pid,
@@ -698,8 +754,9 @@ async def ws_transcribe(ws: WebSocket) -> None:
                 "type": "error",
                 "session_id": session.session_id,
                 "error": f"model load failed: {e}",
-                "hint": "Run `python3 download_model.py` to fetch the Whisper "
-                        "model, then restart the worker.",
+                "hint": "Run `python3 download_model.py --repair` to check and "
+                        "repair the local model cache, then restart the worker.",
+                "cache_root": str(model_cache.hf_cache_root()),
             }))
         except Exception:
             pass

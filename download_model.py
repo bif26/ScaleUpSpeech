@@ -42,6 +42,9 @@ Usage:
     python3 download_model.py tiny       # override model just for this run
     python3 download_model.py --status   # only check if cached, never download
     python3 download_model.py --check    # alias for --status
+    python3 download_model.py --repair   # remove corrupt 0-byte cache leftovers,
+                                         # then verify the model loads (no download
+                                         # unless files are really missing)
 """
 
 from __future__ import annotations
@@ -57,6 +60,10 @@ os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
 
 import fnmatch  # noqa: E402
 from pathlib import Path  # noqa: E402
+
+# Stdlib-only cache repair helpers (same dir as this script). Importing here
+# is safe: model_cache.py uses only the standard library.
+import model_cache  # noqa: E402
 
 # EXACTLY the file set faster-whisper's own download_model() fetches — so the
 # cache this script fills is byte-for-byte the cache WhisperModel() expects.
@@ -204,6 +211,23 @@ class VerboseTqdm(tqdm):
             pass
 
 
+def _sanitize_and_report(model_name: str) -> int:
+    """Remove corrupt 0-byte leftovers from the local cache; return count."""
+    try:
+        removed = model_cache.sanitize_model_cache(model_name)
+    except Exception as e:  # never block the download because of repair issues
+        print(f"  (cache sanitize skipped: {e})")
+        return 0
+    if removed:
+        print("  REPAIR     : removed corrupt 0-byte cache files:")
+        for p in removed:
+            print(f"    - {p}")
+        print("    (an empty vocabulary.json crashes CTranslate2 with")
+        print("     [json.exception.parse_error.101] even when a valid")
+        print("     vocabulary.txt sits next to it - these files are now gone)")
+    return len(removed)
+
+
 def _cache_hit(repo_id: str) -> str | None:
     """Return the local snapshot path if the model is fully cached, else None.
 
@@ -266,6 +290,7 @@ def _load_from_disk(model_path: str) -> None:
 def main() -> int:
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     status_only = any(a in ("--status", "--check") for a in sys.argv[1:])
+    repair = "--repair" in sys.argv[1:]
 
     model_name = args[0] if args else config.MODEL_NAME
     repo_id = _repo_id_for(model_name)
@@ -286,9 +311,17 @@ def main() -> int:
         print("  Run `python3 download_model.py` (no flags) to download it now.")
         return 1
 
+    if repair:
+        print("  Repair mode: checking the local cache for corrupt leftovers...")
+        n = _sanitize_and_report(model_name)
+        if n == 0:
+            print("  REPAIR     : nothing to repair (no 0-byte files found).")
+
     _enable_progress_bars()
 
     # 1) Fast path: already fully cached -> 0 MB, no network at all.
+    #    (Sanitize ran above, so a cache polluted with 0-byte phantoms no
+    #    longer counts as "complete" in a way that would crash the loader.)
     hit = _cache_hit(repo_id)
     if hit:
         print("  Already cached - skipping download entirely (0 MB).")
@@ -306,6 +339,9 @@ def main() -> int:
         repo_id=repo_id, allow_patterns=ALLOW_PATTERNS, tqdm_class=VerboseTqdm
     )
     print(f"  Download complete: {snapshot_dir}")
+
+    # 2b) Sanity check: a fresh download must not contain 0-byte files.
+    _sanitize_and_report(model_name)
 
     # 3) Verify it loads from disk (also catches broken installs early).
     _load_from_disk(snapshot_dir)

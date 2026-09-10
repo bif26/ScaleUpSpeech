@@ -402,6 +402,21 @@ re-download of the current model, delete that folder.
 in this version (it was `cpu_threads=None` being passed when `LS_THREADS=0`).
 `git pull` to get the fix; no other action needed.
 
+**`RuntimeError: [json.exception.parse_error.101] parse error ... unexpected
+end of input` when the model loads** — your local HF cache contains a
+**0-byte leftover file** (typically an empty `vocabulary.json` or
+`preprocessor_config.json`). These files do not exist in the upstream
+`Systran/faster-whisper-*` repos at all; an interrupted or manual download
+left the empty placeholders behind, and `huggingface_hub` never removes them
+(because they are not in the upstream file list, re-downloads skip them).
+CTranslate2 prefers `vocabulary.json` over the perfectly valid
+`vocabulary.txt` next to it, so an empty phantom kills the model load.
+Fixed to self-heal: the worker now detects the failure, deletes 0-byte
+cache files, and retries — a full clean re-download is the last resort.
+You can also repair manually: `python3 download_model.py --repair`, or
+delete the empty files yourself:
+`find ~/.cache/huggingface/hub/models--Systran--faster-whisper-*/snapshots -size 0 -type f -delete`
+
 **pip fails to build a wheel on a brand-new Python** — you likely have an old
 checkout with pinned versions. `git pull` and delete the stale venv so it is
 recreated with the relaxed pins: `rm -rf .venv && ./setup.sh`.
