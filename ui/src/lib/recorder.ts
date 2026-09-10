@@ -26,11 +26,57 @@ export class Recorder {
       sampleRate: 16000,
       latencyHint: 'interactive',
     });
+    // Defensive: Chrome honours the sampleRate option, but some browsers /
+    // drivers silently fall back to the hardware rate. If that happens the
+    // worklet below resamples to 16 kHz itself — feeding 48 kHz samples to
+    // the worker "as 16 kHz" makes speech 3x slow + 3 octaves down, which
+    // Silero VAD then removes 100% of ("VAD filter removed 00:03.232 of
+    // audio" in languageshadow.log) and whisper returns empty transcripts.
+    if (this.ctx.sampleRate !== 16000) {
+      console.warn(`[recorder] AudioContext runs at ${this.ctx.sampleRate} Hz — resampling to 16 kHz`);
+    }
     const srcNode = this.ctx.createMediaStreamSource(this.stream);
 
     // Inline AudioWorkletProcessor — no separate .js file needed.
+    //
+    // CRITICAL: buffer the 128-sample render quanta (8 ms) into ~250 ms
+    // chunks before posting. The old version posted ONE MESSAGE PER QUANTUM
+    // (~125 websocket messages/s) and the worker launched a full whisper
+    // transcription per message — the socket backlog grew unboundedly,
+    // partials never reached the page and the final result was never
+    // computed (the 'can start record but it never shows result' bug).
+    // 4 messages/s instead of ~125 also fixes the zero-copy transfer:
+    // the old code called ch.slice() twice, so the transfer list referenced
+    // a DIFFERENT ArrayBuffer than the one in the message.
+    const TARGET_RATE = 16000;
+    const CHUNK_SAMPLES = TARGET_RATE / 4; // 4000 samples = 250 ms @ 16 kHz
     const workletCode = `
+      const TARGET_RATE = ${TARGET_RATE};
+      const CHUNK_SAMPLES = ${CHUNK_SAMPLES};
+
       class PCMProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          // 'sampleRate' (global) is the ACTUAL context rate.
+          this.ratio = sampleRate / TARGET_RATE; // >1 means downsample
+          this.acc = new Float32Array(CHUNK_SAMPLES);
+          this.accFill = 0;
+          this.frac = 0;
+          this.prev = 0;
+          this.hasPrev = false;
+        }
+
+        emit(rms, chunk) {
+          this.accFill = 0;
+          // chunk owns its buffer (acc.slice()), so it can be transferred.
+          this.port.postMessage({ kind: 'pcm', rms, data: chunk }, [chunk.buffer]);
+        }
+
+        push(sample, rms) {
+          this.acc[this.accFill++] = sample;
+          if (this.accFill === CHUNK_SAMPLES) this.emit(rms, this.acc.slice());
+        }
+
         process(inputs) {
           const in0 = inputs[0];
           if (!in0 || !in0[0]) return true;
@@ -38,14 +84,26 @@ export class Recorder {
           let sum = 0;
           for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
           const rms = Math.sqrt(sum / ch.length);
-          this.port.postMessage({ kind: 'level', rms });
-          // Send a copy of the channel; the buffer stays owned by the worklet
-          // because we transfer a fresh Float32Array built from ch.slice().
-          this.port.postMessage(
-            { kind: 'pcm', data: ch.slice() },
-            // ch.slice() returns a new buffer; we can transfer it.
-            [ch.slice().buffer]
-          );
+
+          if (this.ratio === 1) {
+            // Fast path: context already runs at 16 kHz — just accumulate.
+            for (let i = 0; i < ch.length; i++) this.push(ch[i], rms);
+          } else {
+            // Linear-interpolation resampler inRate -> 16 kHz.
+            let pos = this.frac;
+            let prev = this.hasPrev ? this.prev : ch[0];
+            for (let i = 0; i < ch.length; i++) {
+              while (pos < 1) {
+                this.push(prev + (ch[i] - prev) * pos, rms);
+                pos += this.ratio;
+              }
+              pos -= 1;
+              prev = ch[i];
+            }
+            this.frac = pos;
+            this.prev = prev;
+            this.hasPrev = true;
+          }
           return true;
         }
       }
@@ -60,8 +118,12 @@ export class Recorder {
     });
     this.workletNode.port.onmessage = (e: MessageEvent) => {
       const m = e.data;
-      if (m.kind === 'pcm' && this.onChunk) this.onChunk(m.data as Float32Array);
-      else if (m.kind === 'level' && this.onLevel) this.onLevel(m.rms as number);
+      // One 'pcm' frame per 250 ms chunk (VU level rides along at the same
+      // cadence instead of 125x/s, which starved the main thread).
+      if (m.kind === 'pcm') {
+        this.onLevel?.(m.rms as number);
+        this.onChunk?.(m.data as Float32Array);
+      }
     };
     srcNode.connect(this.workletNode);
     this.running = true;

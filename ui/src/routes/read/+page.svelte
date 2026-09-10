@@ -124,7 +124,15 @@
             handleFinal(frame as AssessResponse);
           }
         },
-        onClose: () => {},
+        onClose: () => {
+          // If the socket dies before the final frame arrives, say so instead
+          // of leaving the user stuck on "Scoring…" forever.
+          if (recording) {
+            recording = false;
+            stateText = 'Disconnected';
+            toastStore.error('Connection lost before scoring finished');
+          }
+        },
         onError: () => {},
       },
     );
@@ -146,11 +154,26 @@
     if (recorder) await recorder.stop();
     recorder = null;
     vuLevel = 0;
+    // The worker transcribes the remaining tail before scoring — give it
+    // time, but never leave the user hanging on "Scoring…" forever.
+    setTimeout(() => {
+      if (!result && stateText === 'Scoring…') {
+        stateText = 'Error';
+        toastStore.error('Scoring timed out — the AI worker did not respond');
+      }
+    }, 15000);
   }
 
   function handleFinal(data: AssessResponse) {
     session?.close();
     session = null;
+    recording = false;
+    if (data.status && data.status !== 'OK') {
+      // e.g. "No speech detected. Please speak louder or closer to the mic."
+      stateText = 'Error';
+      toastStore.error(data.error || 'Scoring failed — no usable audio');
+      return;
+    }
     stateText = 'Done';
     result = data;
     loadRecent();

@@ -96,6 +96,29 @@ CHUNK_SAMPLES = SAMPLE_RATE * CHUNK_MS // 1000  # 4000 samples per chunk
 VAD_ENABLED = True
 VAD_THRESHOLD = 0.35  # 0..1, higher = stricter
 
+# Silero VAD fine-tuning for STREAMING (faster-whisper VadOptions).
+# The library defaults (min_silence 2000 ms, speech_pad 400 ms) are tuned
+# for batch files; on a rolling buffer they keep segments open too long,
+# which delays settling and re-transcribes the same tail over and over.
+VAD_MIN_SPEECH_MS = int(os.environ.get("LS_VAD_MIN_SPEECH_MS", "150"))
+VAD_MIN_SILENCE_MS = int(os.environ.get("LS_VAD_MIN_SILENCE_MS", "600"))
+VAD_SPEECH_PAD_MS = int(os.environ.get("LS_VAD_SPEECH_PAD_MS", "120"))
+
+# Streaming pacing (worker side, StreamingSession.append). whisper-small on
+# CPU transcribes SLOWER than real time (~3 s wall for 1.7 s of speech, see
+# languageshadow.log 2026-09-10), so the worker waits until at least `gap`
+# seconds of NEW audio have accumulated since the last whisper call, where
+# gap adapts to the measured call time (1.5x, clamped to the bounds below).
+# Without pacing, one transcription per incoming chunk makes the socket
+# backlog grow without bound: partials never reach the browser and the
+# final result is never computed.
+STREAM_MIN_GAP_S = float(os.environ.get("LS_STREAM_MIN_GAP", "1.0"))
+STREAM_MAX_GAP_S = float(os.environ.get("LS_STREAM_MAX_GAP", "6.0"))
+
+# Beam size. 1 (greedy) is ~2x faster on CPU with near-identical text for
+# clear speech; set LS_BEAM=5 for maximum accuracy on a fast machine.
+BEAM_SIZE = int(os.environ.get("LS_BEAM", "1"))
+
 # ---------------------------------------------------------------------------
 # Pronunciation scoring
 # ---------------------------------------------------------------------------

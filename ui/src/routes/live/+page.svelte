@@ -106,7 +106,12 @@
           } else if (frame.type === 'final') {
             const f: any = frame;
             partialText = '';
-            if (f.recognized) pushTranscript(f.recognized);
+            if (f.recognized) {
+              pushTranscript(f.recognized);
+            } else if (!transcript) {
+              // Make silence visible instead of a mysterious empty result.
+              toastStore.error('No speech detected — check the mic and speak a bit louder');
+            }
             stateText = 'Paused';
           }
         },
@@ -115,6 +120,7 @@
             recording = false;
             connecting = false;
             stateText = 'Disconnected';
+            toastStore.error('Connection to the AI worker was lost');
           }
         },
         onError: () => {},
@@ -146,10 +152,12 @@
     rec?.stop();
     if (pending) {
       pending.end();
-      // Give the final frame a moment to arrive before we declare done.
+      // The worker transcribes the remaining tail before sending the final
+      // frame — on CPU this can take several seconds. Give it time before we
+      // declare done (the final frame itself flips state to 'Paused').
       setTimeout(() => {
         if (!recording) stateText = transcript ? 'Paused' : 'Idle';
-      }, 800);
+      }, 15000);
     } else {
       stateText = transcript ? 'Paused' : 'Idle';
     }

@@ -75,6 +75,13 @@ log = logging.getLogger("worker")
 for _noisy in ("httpx", "httpcore"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
+# faster-whisper logs "Processing audio with duration ..." and "VAD filter
+# removed ... of audio" on EVERY transcribe call. Streaming makes several
+# calls per second, which flooded the shared log with 800+ near-identical
+# lines per session (see languageshadow.log 2026-09-09/10) and hid real
+# errors underneath the noise.
+logging.getLogger("faster_whisper").setLevel(logging.WARNING)
+
 
 # ---------------------------------------------------------------------------
 # ffmpeg audio decoder (webm/opus / ogg/opus / wav -> 16k mono PCM float32)
@@ -226,7 +233,7 @@ def _ffmpeg_available() -> bool:
 
 app = FastAPI(
     title="LanguageShadow Worker",
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan,
 )
 
@@ -273,8 +280,13 @@ def _language_for_whisper(lang_tag: str) -> Optional[str]:
     return base
 
 
-def _transcribe(audio: np.ndarray, language: Optional[str]) -> List[dict]:
-    """Run whisper and return list of segment dicts with word timestamps."""
+def _transcribe(audio: np.ndarray, language: Optional[str],
+                word_timestamps: bool = True) -> List[dict]:
+    """Run whisper and return list of segment dicts (word timestamps optional).
+
+    word_timestamps=False is measurably faster and is used for streaming
+    partials in free-speech mode, where per-word timing is never used.
+    """
     model = model_holder._model
     if model is None:
         raise RuntimeError("model not loaded")
@@ -282,8 +294,14 @@ def _transcribe(audio: np.ndarray, language: Optional[str]) -> List[dict]:
         audio,
         language=language,
         vad_filter=config.VAD_ENABLED,
-        vad_parameters={"threshold": config.VAD_THRESHOLD},
-        word_timestamps=True,
+        vad_parameters={
+            "threshold": config.VAD_THRESHOLD,
+            "min_speech_duration_ms": config.VAD_MIN_SPEECH_MS,
+            "min_silence_duration_ms": config.VAD_MIN_SILENCE_MS,
+            "speech_pad_ms": config.VAD_SPEECH_PAD_MS,
+        },
+        word_timestamps=word_timestamps,
+        beam_size=config.BEAM_SIZE,
     )
     out = []
     for s in segments:
@@ -403,12 +421,16 @@ async def heartbeat() -> dict:
 # WebSocket endpoint for live streaming (used by the web UI, not the extension)
 # ---------------------------------------------------------------------------
 class StreamingSession:
-    # Rolling-window tuning for free-speech (Live Caption) mode. We keep only
-    # the audio tail in the buffer and move finished sentences into
-    # settled_text, so transcription latency stays constant even after hours
-    # of captioning (and RAM stays flat - important for the 2.3 GB budget).
+    # Rolling-window tuning for streaming. We keep only the audio tail in
+    # the buffer and move finished segments out (into settled_text /
+    # settled_segments), so transcription cost stays bounded even after
+    # hours of captioning (and RAM stays flat - important for the 2.3 GB
+    # budget). Segment timestamps are always kept on the ABSOLUTE session
+    # timeline (seconds since session start) even though the buffer gets
+    # re-sliced, by tracking _trimmed_s and rebasing window-relative times.
     SETTLE_MARGIN_S = 1.2   # a segment ends >= this far from buffer end -> settled
-    TAIL_KEEP_S = 20.0      # never transcribe more than the last N seconds
+    TAIL_KEEP_S = 12.0      # never transcribe more than the last N seconds
+                            # (whisper cost explodes with tail length on CPU)
 
     def __init__(self, ws: WebSocket, *, reference_text: str = "",
                  live_scoring: bool = True, target_language: str = "en") -> None:
@@ -418,21 +440,97 @@ class StreamingSession:
         self.target_language = target_language
         self.buffer: np.ndarray = np.zeros(0, dtype=np.float32)
         self.committed_segments: List[dict] = []
-        self.settled_text: str = ""      # free-speech mode: finished transcript
-        self._last_partial: str = ""     # dedupe identical partial frames
+        self.settled_text: str = ""             # free-speech mode: finished transcript
+        self.settled_segments: List[dict] = []  # read-aloud mode: finished segments
+        self._settled_until_s: float = 0.0      # absolute time settled up to
+        self._trimmed_s: float = 0.0            # absolute seconds cut from buffer head
+        self._last_partial: str = ""            # dedupe identical partial frames
+        self._last_len: int = 0                 # buffer length at last transcribe start
+        self._last_transcribe_s: float = 0.0    # measured wall time of last whisper call
+        self._prev_word_count: int = 0          # committed word count last round
         self.start_time = time.time()
         self.session_id = str(uuid.uuid4())
+        mode = "read+score" if reference_text else "live-caption"
+        log.info("ws session %s start (mode=%s, lang=%s)",
+                 self.session_id, mode, target_language)
+
+    # -- buffer / timeline helpers -----------------------------------------
+    def _abs_end_s(self) -> float:
+        """Absolute session time (s) of the last sample in the buffer."""
+        return self._trimmed_s + len(self.buffer) / config.SAMPLE_RATE
+
+    def _trim_to(self, keep_from_abs: float) -> None:
+        """Drop everything before absolute time keep_from_abs from the buffer."""
+        drop_s = min(len(self.buffer) / config.SAMPLE_RATE,
+                     max(0.0, keep_from_abs - self._trimmed_s))
+        if drop_s > 0:
+            self.buffer = self.buffer[int(drop_s * config.SAMPLE_RATE):]
+            self._trimmed_s += drop_s
+
+    def _rebase(self, segments: List[dict], offset_s: float) -> List[dict]:
+        """Shift window-relative whisper timestamps onto the absolute timeline."""
+        if not offset_s:
+            return segments
+        for s in segments:
+            s["start"] = float(s.get("start", 0.0)) + offset_s
+            s["end"] = float(s.get("end", 0.0)) + offset_s
+            for w in s.get("words") or []:
+                w["start"] = float(w.get("start", 0.0)) + offset_s
+                w["end"] = float(w.get("end", 0.0)) + offset_s
+        return segments
+
+    async def _run_transcribe(self, word_timestamps: bool):
+        """Transcribe the rolling tail with adaptive pacing.
+
+        Returns None when pacing says "not enough new audio yet", otherwise
+        the (possibly empty) segment list on the absolute timeline.
+
+        Why pacing is essential: whisper-small on CPU transcribes slower
+        than real time (~3 s wall for a 1.7 s buffer with speech, per
+        languageshadow.log 2026-09-10). The old code launched a full whisper
+        call per incoming chunk (and the client sent ~125 chunks/s), so the
+        socket backlog grew without bound: partials never reached the
+        browser and the final 'END' frame sat behind ~10k queued chunks —
+        the user never saw any result. We now wait until >= 1.5x the last
+        measured whisper cost of NEW audio has accumulated (clamped to
+        [STREAM_MIN_GAP_S, STREAM_MAX_GAP_S]) — self-tuning to machine speed.
+        """
+        gap_s = min(config.STREAM_MAX_GAP_S,
+                    max(config.STREAM_MIN_GAP_S, self._last_transcribe_s * 1.5))
+        new_s = (len(self.buffer) - self._last_len) / config.SAMPLE_RATE
+        if new_s < gap_s:
+            return None
+        self._last_len = len(self.buffer)
+
+        # Never transcribe more than the last TAIL_KEEP_S seconds.
+        max_samples = int(self.TAIL_KEEP_S * config.SAMPLE_RATE)
+        if len(self.buffer) > max_samples:
+            window = self.buffer[-max_samples:]
+        else:
+            window = self.buffer
+        offset_s = self._trimmed_s + (len(self.buffer) - len(window)) / config.SAMPLE_RATE
+
+        t0 = time.perf_counter()
+        try:
+            segments = await asyncio.to_thread(
+                _transcribe, window,
+                _language_for_whisper(self.target_language),
+                word_timestamps)
+            self._last_transcribe_s = time.perf_counter() - t0
+        except Exception as e:
+            log.debug("transcribe failed during streaming: %s", e)
+            self._last_transcribe_s = max(self._last_transcribe_s, 0.5)
+            return []
+        return self._rebase(segments, offset_s)
 
     async def append(self, pcm: np.ndarray) -> None:
         self.buffer = np.concatenate([self.buffer, pcm])
         min_samples = int(config.SAMPLE_RATE * 0.6)
         if len(self.buffer) < min_samples:
             return
-        try:
-            segments = await asyncio.to_thread(_transcribe, self.buffer,
-                                                _language_for_whisper(self.target_language))
-        except Exception as e:
-            log.debug("transcribe failed during streaming: %s", e)
+
+        segments = await self._run_transcribe(bool(self.reference_text))
+        if segments is None:  # pacing: not enough new audio yet
             return
 
         if not self.reference_text:
@@ -440,12 +538,29 @@ class StreamingSession:
             # buffer forward so we only ever transcribe the recent tail.
             await self._emit_partial(segments)
             self._settle(segments)
+            self._last_len = len(self.buffer)
             return
 
-        new_count = sum(len(s.get("words") or []) for s in segments)
-        old_count = sum(len(s.get("words") or []) for s in self.committed_segments)
-        self.committed_segments = segments
-        if new_count > old_count and self.live_scoring:
+        # Read-aloud mode: keep every stable segment, re-transcribe the tail.
+        buf_end = self._abs_end_s()
+        fresh, tail = [], []
+        for s in segments:
+            end = float(s.get("end", 0.0))
+            if end <= buf_end - self.SETTLE_MARGIN_S and end > self._settled_until_s + 0.05:
+                fresh.append(s)
+            else:
+                tail.append(s)
+        if fresh:
+            self.settled_segments.extend(fresh)
+            self._settled_until_s = max(float(s["end"]) for s in fresh)
+            self._trim_to(self._settled_until_s - 0.25)
+        self.committed_segments = self.settled_segments + tail
+
+        new_count = sum(len(s.get("words") or []) for s in self.committed_segments)
+        grew = new_count > self._prev_word_count
+        self._prev_word_count = new_count
+        self._last_len = len(self.buffer)
+        if grew and self.live_scoring:
             await self._emit_incremental()
 
     async def _emit_partial(self, segments: List[dict]) -> None:
@@ -470,23 +585,27 @@ class StreamingSession:
         """Move finished segments out of the rolling buffer into settled_text.
 
         A segment is 'settled' when it ends comfortably before the end of the
-        buffered audio (i.e. whisper is unlikely to revise it further).
+        buffered audio (i.e. whisper is unlikely to revise it further). The
+        0.25 s keep-back sliver can make whisper re-detect the boundary
+        segment on the next pass; the _settled_until_s guard prevents that
+        from duplicating text.
         """
-        buf_s = len(self.buffer) / config.SAMPLE_RATE
-        settled_until = None  # audio seconds up to which everything is settled
+        buf_end = self._abs_end_s()
+        settled_until = None
         for s in segments:
-            if s.get("end", 0.0) <= buf_s - self.SETTLE_MARGIN_S:
+            end = float(s.get("end", 0.0))
+            if end <= buf_end - self.SETTLE_MARGIN_S and end > self._settled_until_s + 0.05:
                 piece = s.get("text", "").strip()
                 if piece:
                     self.settled_text = (self.settled_text + " " + piece).strip()
-                    settled_until = s["end"]
+                    settled_until = end
         if settled_until is not None:
-            keep_from = max(0.0, settled_until - 0.25)
-            self.buffer = self.buffer[int(keep_from * config.SAMPLE_RATE):]
-        elif buf_s > self.TAIL_KEEP_S:
+            self._settled_until_s = max(self._settled_until_s, settled_until)
+            self._trim_to(settled_until - 0.25)
+        elif len(self.buffer) > int(self.TAIL_KEEP_S * config.SAMPLE_RATE):
             # Safety valve: extremely long utterance with no segment boundary -
             # still cap the buffer so latency cannot grow without bound.
-            self.buffer = self.buffer[-int(self.TAIL_KEEP_S * config.SAMPLE_RATE):]
+            self._trim_to(self._abs_end_s() - self.TAIL_KEEP_S)
 
     async def _emit_incremental(self) -> None:
         if not self.reference_text:
@@ -500,15 +619,23 @@ class StreamingSession:
             log.debug("ws send failed during incremental")
 
     async def finalize(self) -> dict:
-        try:
-            segments = await asyncio.to_thread(_transcribe, self.buffer,
-                                                _language_for_whisper(self.target_language))
-        except Exception as e:
-            log.exception("finalize transcribe failed: %s", e)
-            segments = []
+        segments: List[dict] = []
+        if len(self.buffer) >= int(config.SAMPLE_RATE * 0.1):
+            try:
+                segments = await asyncio.to_thread(
+                    _transcribe, self.buffer,
+                    _language_for_whisper(self.target_language),
+                    True)
+                segments = self._rebase(segments, self._trimmed_s)
+            except Exception as e:
+                log.exception("finalize transcribe failed: %s", e)
+                segments = []
 
         if self.reference_text:
-            payload = score_assessment(self.reference_text, segments)
+            # Score everything: stable segments accumulated during streaming
+            # plus whatever is still in the rolling tail.
+            payload = score_assessment(self.reference_text,
+                                       self.settled_segments + segments)
             if payload.get("status") == "OK":
                 await store.add({
                     "ts": time.time(),
@@ -531,6 +658,9 @@ class StreamingSession:
         payload["type"] = "final"
         payload["session_id"] = self.session_id
         payload["duration_s"] = round(time.time() - self.start_time, 2)
+        log.info("ws session %s end: %.1fs, %s", self.session_id,
+                 payload.get("duration_s", 0.0),
+                 (payload.get("recognized", "")[:60] or "no speech"))
         return payload
 
 
@@ -586,6 +716,15 @@ async def ws_transcribe(ws: WebSocket) -> None:
     try:
         while True:
             msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                # Browser closed the tab / navigated away without sending
+                # END. The old code fell through to `continue` and called
+                # receive() again, which raised RuntimeError('Cannot call
+                # "receive" once a disconnect message has been received.')
+                # and spammed the log (languageshadow.log 2026-09-10).
+                log.info("ws disconnected before END (session %s)",
+                         session.session_id)
+                break
             if msg.get("text") == "END":
                 final = await session.finalize()
                 await ws.send_text(json.dumps(final))
